@@ -1,61 +1,82 @@
+<!DOCTYPE html>
 <html>
   <head>
-	<!-- Rights of the object files go to the artists who posted their works on Google Blocks -->
-	<meta charset="UTF-8"/>
-	<script src="https://cdnjs.cloudflare.com/ajax/libs/aframe/0.7.1/aframe.js"></script>
+    <meta charset="UTF-8"/>
+    <title>World of A-Frame</title>
+    <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <script src="js/portal.js"></script>
+    <style>
+      body { margin: 0; font-family: system-ui, sans-serif; }
+      #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+        background: rgba(255,255,255,.78); color: #2c3e34; padding: 10px 14px;
+        border-radius: 10px; font-size: 13px; line-height: 1.5; pointer-events: none; }
+    </style>
   </head>
   <body>
-<a-scene>
-  <a-assets>
-    <img id="logo" src="img/logo.png">
-    <img id="skyTexture" src="img/mountains.jpg">
-    <img id="groundTexture" src="img/wood-floor.jpg">
+    <div id="hint"><b>Choose a world</b><br>Walk up to a door and click it &middot; WASD to walk &middot; drag to look</div>
 
-    <a-asset-item id="snowman" src="objects/snowman.obj"></a-asset-item>
-    <a-asset-item id="snowman-mtl" src="objects/snowman-materials.mtl"></a-asset-item>
-    <a-asset-item id="tree" src="objects/tree.obj"></a-asset-item>
-    <a-asset-item id="tree-mtl" src="objects/tree-materials.mtl"></a-asset-item>
-    <a-asset-item id="star" src="objects/star.obj"></a-asset-item>
-    <a-asset-item id="star-mtl" src="objects/star-materials.mtl"></a-asset-item>	
-    <a-asset-item id="fireplace" src="objects/fireplace.obj"></a-asset-item>
-    <a-asset-item id="fireplace-mtl" src="objects/fireplace-materials.mtl"></a-asset-item>
-	<a-asset-item id="sleigh" src="objects/sleigh.obj"></a-asset-item>
-    <a-asset-item id="sleigh-mtl" src="objects/sleigh.mtl"></a-asset-item>
-	<a-asset-item id="table" src="objects/Table_01.obj"></a-asset-item>
-    <a-asset-item id="table-mtl" src="objects/Table_01.mtl"></a-asset-item>
-	<a-asset-item id="chair" src="objects/WoodChair_01.obj"></a-asset-item>
-    <a-asset-item id="chair-mtl" src="objects/WoodChair_01.mtl"></a-asset-item>
-	<a-asset-item id="couch" src="objects/couch.obj"></a-asset-item>
-    <a-asset-item id="couch-mtl" src="objects/couch.mtl"></a-asset-item>
-	<a-asset-item id="small-table" src="objects/small_table.obj"></a-asset-item>
-    <a-asset-item id="small-table-mtl" src="objects/small_table.mtl"></a-asset-item>
-	<a-asset-item id="TV" src="objects/TV.obj"></a-asset-item>
-    <a-asset-item id="TV-mtl" src="objects/TV.mtl"></a-asset-item>
-	<a-asset-item id="TV-table" src="objects/ikea-table.obj"></a-asset-item>
-    <a-asset-item id="TV-table-mtl" src="objects/ikea-table.mtl"></a-asset-item>
-	<a-asset-item id="plant" src="objects/Houseplant.obj"></a-asset-item>
-    <a-asset-item id="plant-mtl" src="objects/Houseplant.mtl"></a-asset-item>
-  </a-assets>
-	<a-entity position="0 0 5">
-		<a-camera position="2.247 0.5 -1.247" rotation="-4.743 42.559 0" camera="" look-controls="" wasd-controls="" data-aframe-inspector-original-camera=""></a-camera>
-	</a-entity>
-	<a-sound src="sound/JingleBells.mp3" autoplay="true"></a-sound>
-	<a-box src="#logo" position="0 4.132 -5" rotation="0 90 0" scale="2 2 6"></a-box>
-	<a-sky src="#skyTexture"></a-sky>
-	<a-plane src="#groundTexture" rotation="-90 0 0" width="10" height="10" position="0 0 1.125" geometry="height:15"></a-plane>
-	<a-obj-model src="#snowman" mtl="#snowman-mtl" position="3.609 1.215 -3.405" rotation="0 90 0" scale="2.01 2.01 2.01" material=""></a-obj-model>
-	<a-obj-model src="#tree" mtl="#tree-mtl" position="-4.066 1.262 -3.98" rotation="0 90 0" scale="2 2 2" material=""></a-obj-model>
-	<a-obj-model src="#star" mtl="#star-mtl" scale="0.01 0.01 0.01" position="0.124 5.835 6.733" rotation="0 90 0" material=""></a-obj-model>
-	<a-obj-model src="#fireplace" mtl="#fireplace-mtl" scale="0.5 0.5 0.5" position="0 0.26 -4.957" material=""></a-obj-model>
-	<a-obj-model src="#sleigh" mtl="#sleigh-mtl" position="-4.048 0.593 0.574" rotation="0 90 0" scale="1.5 1.5 1.5" material=""></a-obj-model>
-	<a-obj-model src="#table" mtl="#table-mtl" position="0 -0.427 1.293" rotation="270 90 0" scale="0.008 0.008 0.008" material=""></a-obj-model>
-	<a-obj-model src="#chair" mtl="#chair-mtl" scale="0.005 0.005 0.005" position="1.839 -0.003 0.5" rotation="270 0 0" material=""></a-obj-model><a-obj-model src="#chair" mtl="#chair-mtl" scale="0.005 0.005 0.005" position="1.839 -0.003 2.21" rotation="270 0 0" material=""></a-obj-model><a-obj-model src="#chair" mtl="#chair-mtl" scale="0.005 0.005 0.005" position="-1.557 -0.003 2.068" rotation="270 180 0" material=""></a-obj-model><a-obj-model src="#chair" mtl="#chair-mtl" scale="0.005 0.005 0.005" position="-1.557 -0.003 0.449" rotation="270 180 0" material=""></a-obj-model><a-obj-model src="#chair" mtl="#chair-mtl" scale="0.005 0.005 0.005" position="0.014 -0.003 -1.461" rotation="270 90 0" material=""></a-obj-model><a-obj-model src="#chair" mtl="#chair-mtl" scale="0.005 0.005 0.005" position="0.014 -0.003 3.846" rotation="270 270 0" material=""></a-obj-model>
-	<a-obj-model src="#couch" mtl="#couch-mtl" position="-0.589 0.416 7.527" rotation="0 180 0" scale="6 6 6" material=""></a-obj-model>
-	<a-obj-model src="#small-table" mtl="#small-table-mtl" position="1.82 0.484 7.316" material=""></a-obj-model>
-	<a-obj-model src="#TV" mtl="#TV-mtl" scale="0.008 0.008 0.008" position="-4.048 0.584 5.952" rotation="270 180 90" material=""></a-obj-model>
-	<a-obj-model src="#TV-table" mtl="#TV-table-mtl" position="-4.106 0 5.889" scale="2.5 2.5 2.5" material=""></a-obj-model>
-	<a-obj-model src="#plant" mtl="#plant-mtl" position="4.011 0 7.83" scale="0.3 0.3 0.3" material=""></a-obj-model>
-	<a-light type="point" intensity="2" position="0.716 4.618 -1.22"></a-light>
-</a-scene>
+    <a-scene fog="type: linear; color: #0d1017; near: 12; far: 34"
+             renderer="colorManagement: true; antialias: true">
+
+      <a-assets>
+        <img id="floorTexture" src="img/tiles-texture.jpg">
+      </a-assets>
+
+      <a-sky color="#0d1017"></a-sky>
+
+      <!-- Room: a dark antechamber so the two lit doorways carry the eye. -->
+      <a-plane rotation="-90 0 0" width="18" height="18" position="0 0 -1"
+               material="src: #floorTexture; repeat: 6 6; roughness: 0.9"></a-plane>
+      <a-box position="0 3.5 -9.9" width="18" height="7" depth="0.4"
+             material="color: #1a1f2b; roughness: 1"></a-box>
+      <a-box position="-9.1 3.5 -1" width="0.4" height="7" depth="18"
+             material="color: #161b25; roughness: 1"></a-box>
+      <a-box position="9.1 3.5 -1" width="0.4" height="7" depth="18"
+             material="color: #161b25; roughness: 1"></a-box>
+
+      <a-text value="CHOOSE A WORLD" align="center" width="14"
+              color="#e8eef7" position="0 5.4 -9.6"></a-text>
+
+      <!-- Left door: the original snowy Christmas scene. -->
+      <a-entity position="-3.8 0 -9.5">
+        <a-box position="0 2.3 0" width="3.5" height="4.8" depth="0.5"
+               material="color: #2b3240; roughness: 0.9"></a-box>
+        <a-box class="portal" position="0 2.1 0.32" width="2.7" height="4" depth="0.14"
+               material="shader: flat"
+               portal="href: christmas.html; color: #7fc4e8; hover: #dff2ff"></a-box>
+        <a-text value="Snowy Christmas" align="center" width="6"
+                color="#cfe9f7" position="0 4.9 0.4"></a-text>
+        <a-entity position="0 2.4 1.6"
+                  light="type: point; color: #7fc4e8; intensity: 0.9; distance: 9"></a-entity>
+      </a-entity>
+
+      <!-- Right door: the Japanese garden / Ghibli Valley. -->
+      <a-entity position="3.8 0 -9.5">
+        <a-box position="0 2.3 0" width="3.5" height="4.8" depth="0.5"
+               material="color: #2b3240; roughness: 0.9"></a-box>
+        <a-box class="portal" position="0 2.1 0.32" width="2.7" height="4" depth="0.14"
+               material="shader: flat"
+               portal="href: japanese-garden.html; color: #efa8bd; hover: #ffe1ea"></a-box>
+        <a-text value="Japanese Garden" align="center" width="6"
+                color="#f7d6e0" position="0 4.9 0.4"></a-text>
+        <a-entity position="0 2.4 1.6"
+                  light="type: point; color: #efa8bd; intensity: 0.9; distance: 9"></a-entity>
+      </a-entity>
+
+      <a-entity light="type: ambient; color: #46506b; intensity: 0.7"></a-entity>
+      <a-entity position="0 6 2"
+                light="type: point; color: #ffffff; intensity: 0.35; distance: 20"></a-entity>
+
+      <a-entity id="rig" position="0 1.6 2" wasd-controls look-controls>
+        <a-camera>
+          <a-cursor raycaster="objects: .portal" fuse-timeout="1200"
+                    color="#ffffff"></a-cursor>
+        </a-camera>
+      </a-entity>
+
+      <!-- Point-and-click with a headset controller, when one is present. -->
+      <a-entity laser-controls="hand: left"  raycaster="objects: .portal"></a-entity>
+      <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+    </a-scene>
   </body>
 </html>
