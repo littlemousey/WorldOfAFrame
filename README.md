@@ -8,6 +8,9 @@ nothing to install.
 **▶ [Try it](https://littlemousey.github.io/WorldOfAFrame/)** — works in any
 browser, mouse and keyboard, or in a headset via the VR button.
 
+<img width="1824" height="920" alt="image" src="https://github.com/user-attachments/assets/1e03dc42-636e-425c-8213-5dad42edb7f9" />
+
+
 ## The worlds
 
 | | |
