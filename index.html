@@ -4,71 +4,191 @@
     <meta charset="UTF-8"/>
     <title>World of A-Frame</title>
     <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+    <script src="js/cosmos.js"></script>
     <script src="js/portal.js"></script>
+    <script src="js/ambience.js"></script>
     <style>
       body { margin: 0; font-family: system-ui, sans-serif; }
       #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
-        background: rgba(255,255,255,.78); color: #2c3e34; padding: 10px 14px;
+        background: rgba(10,12,26,.62); color: #d8e2ff; padding: 10px 14px;
+        border: 1px solid rgba(150,170,255,.22); backdrop-filter: blur(6px);
         border-radius: 10px; font-size: 13px; line-height: 1.5; pointer-events: none; }
+      #hint b { color: #f0f4ff; letter-spacing: .04em; }
     </style>
   </head>
   <body>
-    <div id="hint"><b>Choose a world</b><br>Walk up to a door and click it &middot; WASD to walk &middot; drag to look</div>
+    <div id="hint"><b>Choose a door</b><br>Walk up to a doorway and click it &middot; WASD to walk &middot; drag to look</div>
 
-    <a-scene fog="type: linear; color: #0d1017; near: 12; far: 34"
-             renderer="colorManagement: true; antialias: true">
+    <!-- Fog is kept tight so the platform dissolves into the void, while the
+         sky and the stars (custom shaders) stay clear of it. -->
+    <a-scene fog="type: linear; color: #05060f; near: 14; far: 46"
+             renderer="colorManagement: true; antialias: true"
+             ambience="src: sounds/universfield-silent-universe-351473.mp3; volume: 0.34">
 
       <a-assets>
         <img id="floorTexture" src="img/tiles-texture.jpg">
       </a-assets>
 
-      <a-sky color="#0d1017"></a-sky>
+      <!-- Deep space: nebula sky, far starfield, and dust drifting nearby. -->
+      <a-entity geometry="primitive: sphere; radius: 800; segmentsWidth: 64; segmentsHeight: 32"
+                material="shader: cosmos-sky; side: back"></a-entity>
+      <a-entity starfield="count: 1800; inner: 260; outer: 640; size: 2.9; spin: 0.008"></a-entity>
+      <a-entity position="0 2.5 -2"
+                starfield="count: 240; shape: volume; extent: 26 8 26; size: 0.12;
+                           spin: 0.02; rise: 0.22; palette: #cfe0ff,#f6dfae,#c9b3ff"></a-entity>
 
-      <!-- Room: a dark antechamber so the two lit doorways carry the eye. -->
-      <a-plane rotation="-90 0 0" width="18" height="18" position="0 0 -1"
-               material="src: #floorTexture; repeat: 6 6; roughness: 0.9"></a-plane>
-      <a-box position="0 3.5 -9.9" width="18" height="7" depth="0.4"
-             material="color: #1a1f2b; roughness: 1"></a-box>
-      <a-box position="-9.1 3.5 -1" width="0.4" height="7" depth="18"
-             material="color: #161b25; roughness: 1"></a-box>
-      <a-box position="9.1 3.5 -1" width="0.4" height="7" depth="18"
-             material="color: #161b25; roughness: 1"></a-box>
+      <!-- A single lit island floating in all that dark. -->
+      <a-circle radius="9" rotation="-90 0 0" position="0 0 -1"
+                material="src: #floorTexture; repeat: 6 6; color: #5a6486;
+                          roughness: 0.35; metalness: 0.45"></a-circle>
+      <a-ring radius-inner="8.55" radius-outer="9" rotation="-90 0 0" position="0 0.02 -1"
+              material="shader: flat; color: #7f9dff; opacity: 0.55;
+                        transparent: true; side: double"></a-ring>
+      <a-ring radius-inner="3.1" radius-outer="3.25" rotation="-90 0 0" position="0 0.02 -1"
+              material="shader: flat; color: #6f86d8; opacity: 0.3;
+                        transparent: true; side: double"></a-ring>
 
-      <a-text value="CHOOSE A WORLD" align="center" width="14"
-              color="#e8eef7" position="0 5.4 -9.6"></a-text>
+      <a-text value="CHOOSE A DOOR" align="center" width="15"
+              color="#e8eef7" position="0 7.0 -9.5"></a-text>
 
-      <!-- Left door: the original snowy Christmas scene. -->
-      <a-entity position="-3.8 0 -9.5">
-        <a-box position="0 2.3 0" width="3.5" height="4.8" depth="0.5"
-               material="color: #2b3240; roughness: 0.9"></a-box>
-        <a-box class="portal" position="0 2.1 0.32" width="2.7" height="4" depth="0.14"
-               material="shader: flat"
-               portal="href: christmas.html; color: #7fc4e8; hover: #dff2ff"></a-box>
-        <a-text value="Snowy Christmas" align="center" width="6"
-                color="#cfe9f7" position="0 4.9 0.4"></a-text>
-        <a-entity position="0 2.4 1.6"
-                  light="type: point; color: #7fc4e8; intensity: 0.9; distance: 9"></a-entity>
+      <!-- The four gates stand on an arc of radius 7.4 around the platform
+           centre (0,-1), each turned to face the middle. They are open arches,
+           deliberately unlabelled: the choice is made on the doorway itself,
+           not on a caption. -->
+
+      <!-- Snow: a narrow pointed arch of ice, hung with icicles. -->
+      <a-entity position="-5.67 0.18 -5.76" rotation="0 50 0"
+                animation="property: object3D.position.y; from: 0.18; to: 0.34;
+                           dir: alternate; loop: true; dur: 5200; easing: easeInOutSine">
+        <a-entity geometry="primitive: gothic; halfWidth: 1.46; straightHeight: 2.3; rise: 1.72"
+                  position="0 0 -0.06"
+                  material="shader: flat; color: #bcd9f0; opacity: 0.34;
+                            transparent: true"></a-entity>
+        <a-entity geometry="primitive: gothic-frame; halfWidth: 1.2; straightHeight: 2.3;
+                            rise: 1.45; thickness: 0.3; depth: 0.45"
+                  material="color: #93b8d4; roughness: 0.22; metalness: 0.2"></a-entity>
+        <a-entity class="portal"
+                  geometry="primitive: gothic; halfWidth: 1.2; straightHeight: 2.3; rise: 1.45"
+                  position="0 0 0.15" material="shader: flat"
+                  portal="href: snow.html; color: #bcd9f0; hover: #eaf5ff"></a-entity>
+        <a-cone position="-1.02 2.14 0.26" radius-bottom="0.08" radius-top="0.01" height="0.5"
+                rotation="180 0 0" material="color: #dbeefc; opacity: 0.9; transparent: true"></a-cone>
+        <a-cone position="-0.66 2.62 0.26" radius-bottom="0.06" radius-top="0.01" height="0.34"
+                rotation="180 0 0" material="color: #dbeefc; opacity: 0.9; transparent: true"></a-cone>
+        <a-cone position="0.72 2.56 0.26" radius-bottom="0.07" radius-top="0.01" height="0.42"
+                rotation="180 0 0" material="color: #dbeefc; opacity: 0.9; transparent: true"></a-cone>
+        <a-cone position="1.06 2.06 0.26" radius-bottom="0.05" radius-top="0.01" height="0.28"
+                rotation="180 0 0" material="color: #dbeefc; opacity: 0.9; transparent: true"></a-cone>
+        <a-entity position="0 2.2 1.6"
+                  light="type: point; color: #bcd9f0; intensity: 1.1; distance: 11"></a-entity>
       </a-entity>
 
-      <!-- Right door: the Japanese garden / Ghibli Valley. -->
-      <a-entity position="3.8 0 -9.5">
-        <a-box position="0 2.3 0" width="3.5" height="4.8" depth="0.5"
-               material="color: #2b3240; roughness: 0.9"></a-box>
-        <a-box class="portal" position="0 2.1 0.32" width="2.7" height="4" depth="0.14"
-               material="shader: flat"
-               portal="href: japanese-garden.html; color: #efa8bd; hover: #ffe1ea"></a-box>
-        <a-text value="Japanese Garden" align="center" width="6"
-                color="#f7d6e0" position="0 4.9 0.4"></a-text>
-        <a-entity position="0 2.4 1.6"
-                  light="type: point; color: #efa8bd; intensity: 0.9; distance: 9"></a-entity>
+      <!-- Jungle: a round arch of old wood, overgrown and trailing vines. -->
+      <a-entity position="-2.16 0.18 -8.08" rotation="0 17 0"
+                animation="property: object3D.position.y; from: 0.18; to: 0.34;
+                           dir: alternate; loop: true; dur: 4800; delay: 600;
+                           easing: easeInOutSine">
+        <a-entity geometry="primitive: arch; halfWidth: 1.62; straightHeight: 2.3"
+                  position="0 0 -0.06"
+                  material="shader: flat; color: #7fd98a; opacity: 0.34;
+                            transparent: true"></a-entity>
+        <a-entity geometry="primitive: arch-frame; halfWidth: 1.35; straightHeight: 2.3;
+                            thickness: 0.36; depth: 0.5"
+                  material="color: #5a4632; roughness: 0.95"></a-entity>
+        <a-entity class="portal"
+                  geometry="primitive: arch; halfWidth: 1.35; straightHeight: 2.3"
+                  position="0 0 0.17" material="shader: flat"
+                  portal="href: jungle.html; color: #7fd98a; hover: #d8ffe4"></a-entity>
+        <!-- Leaf clumps swallowing the stonework. -->
+        <a-sphere position="-1.5 3.02 0.16" radius="0.52" scale="1 0.62 0.8"
+                  material="color: #3f7a3a; roughness: 1"></a-sphere>
+        <a-sphere position="-0.72 3.66 0.14" radius="0.46" scale="1.1 0.6 0.8"
+                  material="color: #4b8c42; roughness: 1"></a-sphere>
+        <a-sphere position="0.5 3.72 0.16" radius="0.4" scale="1 0.62 0.8"
+                  material="color: #3f7a3a; roughness: 1"></a-sphere>
+        <a-sphere position="1.44 3.1 0.14" radius="0.5" scale="1 0.6 0.8"
+                  material="color: #4b8c42; roughness: 1"></a-sphere>
+        <a-sphere position="1.62 1.5 0.1" radius="0.34" scale="0.8 1.5 0.8"
+                  material="color: #3f7a3a; roughness: 1"></a-sphere>
+        <!-- Lianas hanging through the opening. -->
+        <a-cylinder position="-0.95 2.62 0.22" radius="0.026" height="1.5"
+                    material="color: #4a6b33"></a-cylinder>
+        <a-cylinder position="0.42 2.9 0.22" radius="0.022" height="1.0"
+                    material="color: #4a6b33"></a-cylinder>
+        <a-cylinder position="1.02 2.5 0.22" radius="0.03" height="1.8"
+                    material="color: #4a6b33"></a-cylinder>
+        <a-entity position="0 2.2 1.6"
+                  light="type: point; color: #7fd98a; intensity: 1.1; distance: 11"></a-entity>
       </a-entity>
 
-      <a-entity light="type: ambient; color: #46506b; intensity: 0.7"></a-entity>
-      <a-entity position="0 6 2"
-                light="type: point; color: #ffffff; intensity: 0.35; distance: 20"></a-entity>
+      <!-- Japanese garden: a torii, so the opening is a rectangle under a beam. -->
+      <a-entity position="2.16 0.18 -8.08" rotation="0 -17 0"
+                animation="property: object3D.position.y; from: 0.18; to: 0.34;
+                           dir: alternate; loop: true; dur: 4600; delay: 900;
+                           easing: easeInOutSine">
+        <a-plane class="portal" position="0 1.8 0.06" width="2.6" height="3.6"
+                 material="shader: flat"
+                 portal="href: japanese-garden.html; color: #efa8bd; hover: #ffe1ea"></a-plane>
+        <a-cylinder position="-1.44 1.82 0" radius="0.15" height="3.64"
+                    material="color: #c4462f; roughness: 0.85"></a-cylinder>
+        <a-cylinder position="1.44 1.82 0" radius="0.15" height="3.64"
+                    material="color: #c4462f; roughness: 0.85"></a-cylinder>
+        <!-- Kasagi and shimaki: the two stacked beams across the top. -->
+        <a-box position="0 3.78 0" width="3.9" height="0.2" depth="0.34"
+               material="color: #a83a26; roughness: 0.85"></a-box>
+        <a-box position="0 3.56 0" width="3.4" height="0.16" depth="0.26"
+               material="color: #c4462f; roughness: 0.85"></a-box>
+        <!-- Nuki: the tie beam lower down. -->
+        <a-box position="0 2.92 0" width="3.1" height="0.15" depth="0.2"
+               material="color: #c4462f; roughness: 0.85"></a-box>
+        <a-entity position="0 2.2 1.6"
+                  light="type: point; color: #efa8bd; intensity: 1.1; distance: 11"></a-entity>
+      </a-entity>
 
-      <a-entity id="rig" position="0 1.6 2" wasd-controls look-controls>
-        <a-camera>
+      <!-- Cave: no masonry at all, just a hole broken through rock. -->
+      <a-entity position="5.67 0.18 -5.76" rotation="0 -50 0"
+                animation="property: object3D.position.y; from: 0.18; to: 0.34;
+                           dir: alternate; loop: true; dur: 5600; delay: 1500;
+                           easing: easeInOutSine">
+        <a-entity geometry="primitive: cave-mouth; halfWidth: 1.62; height: 3.6; seed: 3"
+                  position="0 0 -0.06"
+                  material="shader: flat; color: #a98ff2; opacity: 0.3;
+                            transparent: true"></a-entity>
+        <a-entity geometry="primitive: cave-mouth-frame; halfWidth: 1.45; height: 3.4;
+                            thickness: 0.46; depth: 0.6; seed: 3"
+                  material="color: #2b2740; roughness: 1"></a-entity>
+        <a-entity class="portal"
+                  geometry="primitive: cave-mouth; halfWidth: 1.45; height: 3.4; seed: 3"
+                  position="0 0 0.2" material="shader: flat"
+                  portal="href: cave.html; color: #a98ff2; hover: #e4dcff"></a-entity>
+        <!-- Crystals growing out of the broken rim. -->
+        <a-octahedron position="-1.66 1.2 0.22" radius="0.26" scale="0.5 1.5 0.5"
+                      rotation="0 0 14"
+                      material="color: #6a4fb0; emissive: #a98ff2; emissiveIntensity: 0.9"></a-octahedron>
+        <a-octahedron position="-1.38 2.72 0.2" radius="0.2" scale="0.5 1.4 0.5"
+                      rotation="0 0 -22"
+                      material="color: #6a4fb0; emissive: #a98ff2; emissiveIntensity: 0.9"></a-octahedron>
+        <a-octahedron position="1.5 2.3 0.22" radius="0.3" scale="0.5 1.6 0.5"
+                      rotation="0 0 -12"
+                      material="color: #6a4fb0; emissive: #c0a8ff; emissiveIntensity: 0.9"></a-octahedron>
+        <a-octahedron position="0.3 3.72 0.2" radius="0.22" scale="0.5 1.3 0.5"
+                      rotation="0 0 8"
+                      material="color: #6a4fb0; emissive: #a98ff2; emissiveIntensity: 0.9"></a-octahedron>
+        <a-octahedron position="1.72 0.8 0.2" radius="0.18" scale="0.5 1.2 0.5"
+                      rotation="0 0 -8"
+                      material="color: #6a4fb0; emissive: #c0a8ff; emissiveIntensity: 0.9"></a-octahedron>
+        <a-entity position="0 2.2 1.6"
+                  light="type: point; color: #a98ff2; intensity: 1.1; distance: 11"></a-entity>
+      </a-entity>
+
+      <a-entity light="type: ambient; color: #33406b; intensity: 0.55"></a-entity>
+      <a-entity position="0 7 1"
+                light="type: point; color: #b9c8ff; intensity: 0.45; distance: 22"></a-entity>
+
+      <a-entity id="rig" position="0 1.6 5.5" wasd-controls look-controls>
+        <!-- a-camera brings its own wasd-controls and look-controls; left on
+             alongside the rig's they run at double rate. -->
+        <a-camera wasd-controls="enabled: false" look-controls="enabled: false">
           <a-cursor raycaster="objects: .portal" fuse-timeout="1200"
                     color="#ffffff"></a-cursor>
         </a-camera>

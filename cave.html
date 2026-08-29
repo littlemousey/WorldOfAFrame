@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Crystal Cave</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/cosmos.js"></script>
+<script src="js/portal.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(14,12,30,.68); color: #d9d2f4; padding: 10px 14px;
+    border: 1px solid rgba(170,150,240,.28); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #efe9ff; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+
+/* The chamber: a rock floor with a still black pool sunk into the middle. */
+const CAVE_R = 34;          /* wall radius   */
+const POOL = { x: 2, z: -13, r: 10 };
+const WATER_Y = -1.05;
+
+function poolMask(x, z) {
+  const d = Math.hypot(x - POOL.x, z - POOL.z);
+  return 1 - THREE.MathUtils.smoothstep(d, 4, POOL.r + 2);
+}
+/* Flat where you arrive, rubble further out, and the basin carved under it. */
+function floorH(x, z) {
+  const d = Math.hypot(x, z);
+  const ramp = THREE.MathUtils.smoothstep(d, 7, 30);
+  const rubble = ((fbm(x * 0.05, z * 0.05) - 0.5) * 6 +
+                  (fbm(x * 0.17, z * 0.17) - 0.5) * 1.3) * ramp;
+  const rise = THREE.MathUtils.smoothstep(d, 20, CAVE_R) * 7;   /* up into the walls */
+  return rubble + rise - poolMask(x, z) * 2.6;
+}
+function ceilingH(x, z) {
+  const d = Math.hypot(x, z);
+  return 15 - THREE.MathUtils.smoothstep(d, 8, CAVE_R) * 8
+            + (fbm(x * 0.06 + 40, z * 0.06 + 40) - 0.5) * 4.5;
+}
+
+/* ---------- rock shells ---------- */
+function rockMesh(heightFn, size, segs, flip, color) {
+  const geo = new THREE.PlaneGeometry(size, size, segs, segs);
+  geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position, colors = new Float32Array(p.count * 3);
+  const cDark = new THREE.Color('#1c1a2a'), cLit = new THREE.Color('#3b3550'),
+        tmp = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    p.setY(i, heightFn(x, z));
+    const t = THREE.MathUtils.clamp(fbm(x * 0.13, z * 0.13) * 1.6 - 0.25, 0, 1);
+    tmp.copy(cDark).lerp(cLit, t);
+    colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({
+    vertexColors: true, color: color || '#ffffff',
+    side: flip ? THREE.BackSide : THREE.FrontSide }));
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+AFRAME.registerComponent('cave-shell', {
+  init: function () {
+    const group = new THREE.Group();
+    group.add(rockMesh(floorH, 110, 150, false));
+    /* Ceiling uses the back side so it is lit and visible from underneath. */
+    group.add(rockMesh(ceilingH, 110, 90, true));
+
+    /* A ring wall closes the chamber off, noisy enough to read as rock. */
+    const wall = new THREE.CylinderGeometry(CAVE_R, CAVE_R, 34, 72, 24, true);
+    const wp = wall.attributes.position;
+    for (let i = 0; i < wp.count; i++) {
+      const x = wp.getX(i), y = wp.getY(i), z = wp.getZ(i);
+      const a = Math.atan2(z, x);
+      const bulge = (fbm(a * 3.4 + 11, y * 0.12 + 5) - 0.5) * 7;
+      const r = CAVE_R + bulge;
+      wp.setX(i, Math.cos(a) * r); wp.setZ(i, Math.sin(a) * r);
+    }
+    wall.computeVertexNormals();
+    const wallMesh = new THREE.Mesh(wall, new THREE.MeshLambertMaterial({
+      color: '#2a2740', side: THREE.BackSide }));
+    wallMesh.position.y = 9;
+    group.add(wallMesh);
+
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- the black pool ---------- */
+AFRAME.registerComponent('dark-water', {
+  init: function () {
+    const self = this;
+    const geo = new THREE.PlaneGeometry(34, 34, 80, 80);
+    geo.rotateX(-Math.PI / 2);
+    /* Dark but deliberately NOT metallic: a full metal with no environment map
+       has nothing to reflect and renders as a flat black hole. Keeping it a
+       dielectric lets the crystal point lights streak across the surface. */
+    const mat = new THREE.MeshStandardMaterial({
+      color: '#0b1622', roughness: 0.13, metalness: 0.2,
+      emissive: '#06202b', emissiveIntensity: 0.4,
+      transparent: true, opacity: 0.92 });
+    mat.onBeforeCompile = function (shader) {
+      shader.uniforms.uTime = { value: 0 };
+      shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+         float dx = 0.030 * 0.7 * cos(uTime * 0.55 + position.x * 0.7 + position.z * 0.2);
+         float dz = 0.024 * 1.0 * cos(uTime * 0.75 + position.z * 1.0 - position.x * 0.3);
+         objectNormal = normalize(vec3(-dx, 1.0, -dz));`);
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         transformed.y += 0.030 * sin(uTime * 0.55 + position.x * 0.7 + position.z * 0.2)
+                        + 0.024 * sin(uTime * 0.75 + position.z * 1.0 - position.x * 0.3);`);
+      self.shader = shader;
+    };
+    mat.customProgramCacheKey = function () { return 'dark-water'; };
+    this.el.setObject3D('mesh', new THREE.Mesh(geo, mat));
+  },
+  tick: function (t) { if (this.shader) this.shader.uniforms.uTime.value = t / 1000; }
+});
+
+/* ---------- crystals ------------------------------------------------------
+   Blunt tapered columns, emissive so they glow on their own. Only a handful
+   get a real point light — WebGL has a hard budget for those — while the rest
+   read as lit purely from the emissive colour.                               */
+AFRAME.registerComponent('crystal-cluster', {
+  schema: {
+    seed:   {default: 1},
+    count:  {default: 9},
+    scale:  {default: 1},
+    hue:    {default: 0.72},
+    spread: {default: 1.6},
+    light:  {default: 0},        /* intensity, 0 for no real light */
+    onWall: {default: false}
+  },
+  init: function () {
+    const d = this.data, rnd = mulberry32(d.seed * 3313 + 17);
+    const group = new THREE.Group(), dummy = new THREE.Object3D();
+    const col = new THREE.Color(), emissive = new THREE.Color();
+    emissive.setHSL(d.hue, 0.75, 0.55);
+
+    const mat = new THREE.MeshStandardMaterial({
+      color: emissive.clone().multiplyScalar(0.35),
+      emissive: emissive, emissiveIntensity: 1.25,
+      roughness: 0.15, metalness: 0.1,
+      transparent: true, opacity: 0.9 });
+
+    /* A flat-topped hexagonal column, not a spike: blunt crystals read as
+       gems, sharp ones read as hazards. */
+    const mesh = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.52, 1, 1, 6), mat, d.count);
+    for (let i = 0; i < d.count; i++) {
+      const a = rnd() * Math.PI * 2, r = Math.pow(rnd(), 0.6) * d.spread;
+      const len = (0.7 + rnd() * 1.5) * d.scale;
+      const thick = (0.3 + rnd() * 0.34) * d.scale;
+      dummy.position.set(Math.cos(a) * r, len * 0.45, Math.sin(a) * r);
+      /* A little lean so the cluster is not a row of posts, but not a splay. */
+      dummy.rotation.set((rnd() - 0.5) * 0.34 + (d.onWall ? Math.PI / 2.4 : 0),
+                         rnd() * Math.PI * 2, (rnd() - 0.5) * 0.34);
+      dummy.scale.set(thick, len, thick);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      col.setHSL(d.hue + (rnd() - 0.5) * 0.08, 0.7, 0.55 + rnd() * 0.2);
+      mesh.setColorAt(i, col);
+    }
+    group.add(mesh);
+
+    if (d.light > 0) {
+      const lamp = new THREE.PointLight(emissive.getHex(), d.light, 26, 2);
+      lamp.position.set(0, 1.4 * d.scale, 0);
+      group.add(lamp);
+    }
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- boulders and rubble -------------------------------------------
+   A chamber of bare crystal reads as hazardous. Rock scattered around them
+   makes the crystals feel like something growing in a cave instead.          */
+AFRAME.registerComponent('boulders', {
+  schema: { count: {default: 64}, rubble: {default: 230} },
+  init: function () {
+    const rnd = mulberry32(4477);
+    const group = new THREE.Group();
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+
+    /* Angular low-poly lumps, scaled unevenly so no two read as the same rock. */
+    function scatter(count, minS, maxS, detail) {
+      const mesh = new THREE.InstancedMesh(
+        new THREE.IcosahedronGeometry(1, detail),
+        new THREE.MeshLambertMaterial({ color: '#ffffff' }), count);
+      let placed = 0;
+      for (let i = 0; i < count; i++) {
+        const a = rnd() * Math.PI * 2, r = 3 + Math.sqrt(rnd()) * (CAVE_R - 5);
+        const x = Math.cos(a) * r, z = Math.sin(a) * r;
+        const h = floorH(x, z);
+        /* Allow a few into the shallows at the pool edge, none in the deep. */
+        if (h < WATER_Y - 0.35) continue;
+        /* Never drop one on top of the arrival spot or the way back. */
+        if (Math.hypot(x, z - 9) < 5.5) continue;
+        if (Math.hypot(x, z - 13) < 3.5) continue;
+        const s = minS + rnd() * (maxS - minS);
+        dummy.position.set(x, h + s * 0.34, z);
+        dummy.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
+        dummy.scale.set(s * (0.8 + rnd() * 0.5), s * (0.55 + rnd() * 0.5),
+                        s * (0.8 + rnd() * 0.5));
+        dummy.updateMatrix();
+        mesh.setMatrixAt(placed, dummy.matrix);
+        col.setHSL(0.68 + (rnd() - 0.5) * 0.06, 0.1 + rnd() * 0.12,
+                   0.12 + rnd() * 0.12);
+        mesh.setColorAt(placed, col);
+        placed++;
+      }
+      mesh.count = placed;
+      mesh.frustumCulled = false;
+      mesh.receiveShadow = true;
+      group.add(mesh);
+    }
+
+    scatter(this.data.count, 0.8, 2.4, 0);      /* boulders */
+    scatter(this.data.rubble, 0.14, 0.5, 0);    /* loose rubble underfoot */
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- stalactites and stalagmites ---------- */
+AFRAME.registerComponent('speleothems', {
+  schema: { count: {default: 90} },
+  init: function () {
+    const rnd = mulberry32(778);
+    const mat = new THREE.MeshLambertMaterial({ color: '#332e48' });
+    const mesh = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 6), mat, this.data.count);
+    const dummy = new THREE.Object3D();
+    let placed = 0;
+    for (let i = 0; i < this.data.count; i++) {
+      const a = rnd() * Math.PI * 2, r = 5 + Math.sqrt(rnd()) * (CAVE_R - 8);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const down = rnd() < 0.55;
+      const len = 1.2 + rnd() * 4.5, rad = 0.18 + rnd() * 0.55;
+      if (down) {
+        dummy.position.set(x, ceilingH(x, z) - len / 2, z);
+        dummy.rotation.set(Math.PI, rnd() * 3, 0);       /* hang point-down */
+      } else {
+        const h = floorH(x, z);
+        if (h < WATER_Y + 0.2) continue;                 /* not out of the pool */
+        dummy.position.set(x, h + len / 2, z);
+        dummy.rotation.set(0, rnd() * 3, 0);
+      }
+      dummy.scale.set(rad, len, rad);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(placed, dummy.matrix);
+      placed++;
+    }
+    mesh.count = placed;
+    mesh.frustumCulled = false;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- keep the camera on the rock, wading the shallows ---------- */
+AFRAME.registerComponent('cave-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    /* Stay inside the chamber. */
+    const d = Math.hypot(p.x, p.z);
+    if (d > CAVE_R - 4) { p.x *= (CAVE_R - 4) / d; p.z *= (CAVE_R - 4) / d; }
+    const ground = Math.max(floorH(p.x, p.z), WATER_Y - 0.5);
+    p.y = ground + this.data.height;
+  }
+});
+
+/* ---------- scatter crystal clusters through the chamber ---------- */
+AFRAME.registerComponent('populate', {
+  init: function () {
+    const rnd = mulberry32(20260829);
+    /* Hand-placed hero clusters carry the lighting; the rest is scatter. */
+    const hero = [
+      { x: -7,  z: -6,  hue: 0.72, scale: 2.6, light: 2.4 },
+      { x:  9,  z: -20, hue: 0.52, scale: 3.0, light: 2.6 },
+      { x: -13, z: -22, hue: 0.78, scale: 2.2, light: 2.0 },
+      { x: 13,  z:  2,  hue: 0.58, scale: 2.4, light: 2.2 },
+      { x: -2,  z:  9,  hue: 0.68, scale: 1.8, light: 1.6 }
+    ];
+    for (let i = 0; i < hero.length; i++) {
+      const s = hero[i];
+      const e = document.createElement('a-entity');
+      e.setAttribute('position', s.x + ' ' + floorH(s.x, s.z) + ' ' + s.z);
+      e.setAttribute('crystal-cluster', 'seed: ' + (i + 1) + '; count: 11; scale: ' +
+        s.scale + '; hue: ' + s.hue + '; spread: ' + (s.scale * 0.9) +
+        '; light: ' + s.light);
+      this.el.appendChild(e);
+    }
+
+    for (let i = 0; i < 30; i++) {
+      const a = rnd() * Math.PI * 2, r = 6 + Math.sqrt(rnd()) * (CAVE_R - 10);
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const h = floorH(x, z);
+      if (h < WATER_Y + 0.1) continue;                   /* keep them out of the pool */
+      const e = document.createElement('a-entity');
+      e.setAttribute('position', x + ' ' + h + ' ' + z);
+      e.setAttribute('crystal-cluster', 'seed: ' + (i + 40) + '; count: ' +
+        (4 + Math.floor(rnd() * 5)) + '; scale: ' + (0.6 + rnd() * 1.2).toFixed(2) +
+        '; hue: ' + (0.5 + rnd() * 0.32).toFixed(3) +
+        '; spread: ' + (0.7 + rnd()).toFixed(2) + '; light: 0');
+      this.el.appendChild(e);
+    }
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Crystal Cave</b><br>WASD / arrows to walk &middot; drag to look &middot; the crystals are the only light</div>
+
+<a-scene fog="type: exponential; color: #07060f; density: 0.026"
+         renderer="colorManagement: true; antialias: true"
+         populate>
+
+  <!-- No sky: past the fog there is only rock and dark. -->
+  <a-entity geometry="primitive: sphere; radius: 300"
+            material="shader: flat; color: #05040c; side: back; fog: false"></a-entity>
+
+  <!-- Barely any general light. Everything you see, the crystals are paying for. -->
+  <a-entity light="type: ambient; color: #2a2645; intensity: 0.5"></a-entity>
+  <a-entity light="type: hemisphere; color: #4a4270; groundColor: #14121f; intensity: 0.35"></a-entity>
+
+  <a-entity cave-shell></a-entity>
+  <a-entity boulders></a-entity>
+  <a-entity speleothems></a-entity>
+
+  <a-entity position="2 -1.05 -13" dark-water></a-entity>
+
+  <!-- Spores drifting up out of the dark, reusing the hub's point cloud. -->
+  <a-entity position="0 4 -8"
+            starfield="count: 220; shape: volume; extent: 46 12 46; size: 0.1;
+                       spin: 0.004; rise: 0.1; palette: #9ee8ff,#c9a6ff,#8affd6"></a-entity>
+
+  <a-entity id="rig" position="0 1.6 9" cave-walk
+            wasd-controls="acceleration: 40" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="400" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"
+                color="#d9d2f4"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Way back to the hub room: turn around from the starting spot. -->
+  <a-entity position="0 0 13" rotation="0 180 0">
+    <a-box position="0 1.5 0" width="2.3" height="3.2" depth="0.3"
+           material="color: #2a2740; roughness: 0.9"></a-box>
+    <a-box class="portal" position="0 1.4 0.2" width="1.7" height="2.6" depth="0.1"
+           material="shader: flat"
+           portal="href: index.html; color: #b9a6f0; hover: #e4dcff"></a-box>
+    <a-text value="Back to the hub" align="center" width="4" color="#ded2fb"
+            position="0 3.3 0.25"></a-text>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

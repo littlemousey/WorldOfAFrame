@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Jungle Hollow</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/cosmos.js"></script>
+<script src="js/portal.js"></script>
+<script src="js/ambience.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(12,32,20,.66); color: #dcf3e0; padding: 10px 14px;
+    border: 1px solid rgba(150,220,170,.25); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #eefff0; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- value noise / fbm ---------- */
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+
+/* The clearing: a lagoon sunk into the hollow, flat ground where you start. */
+const LAGOON = { x: 0, z: -15, r: 8.5 };
+const WATER_Y = -1.15;
+/* The hollow is walled in by dense forest. WALK_R stops you just short of the
+   thicket, so you never reach the edge of the world behind it. */
+const WALL_R = 29;
+const WALK_R = 26;
+
+function lagoonMask(x, z) {
+  const d = Math.hypot(x - LAGOON.x, z - LAGOON.z);
+  return 1 - THREE.MathUtils.smoothstep(d, 3.5, LAGOON.r + 2.5);
+}
+function terrainH(x, z) {
+  const d = Math.hypot(x, z);
+  const ramp = THREE.MathUtils.smoothstep(d, 9, 44);
+  const hills = ((fbm(x * 0.022, z * 0.022) - 0.5) * 10 +
+                 (fbm(x * 0.085, z * 0.085) - 0.5) * 2.2) * ramp;
+  const m = lagoonMask(x, z);
+  const h = hills - m * 2.9;
+  /* Only the lagoon may sit below the waterline. Without this the noise digs
+     stray puddles all over the forest floor, wherever it dips past WATER_Y. */
+  return m < 0.03 ? Math.max(h, WATER_Y + 0.3) : h;
+}
+
+/* ---------- runtime canvas textures ---------- */
+/* A cluster of leaves on one card: cheaper than modelling each leaf, and with
+   alphaTest it still reads as separate foliage at the silhouette. */
+function leafClusterTexture(seed, hue) {
+  const S = 128, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d'), rnd = mulberry32(seed);
+  for (let i = 0; i < 34; i++) {
+    const a = rnd() * Math.PI * 2, r = Math.pow(rnd(), 0.6) * S * 0.44;
+    const px = S / 2 + Math.cos(a) * r, py = S / 2 + Math.sin(a) * r;
+    const rx = 10 + rnd() * 16, ry = rx * (0.34 + rnd() * 0.3);
+    const fall = 1 - r / (S * 0.55);
+    g.save();
+    g.translate(px, py); g.rotate(rnd() * Math.PI * 2);
+    g.fillStyle = 'hsla(' + (hue + rnd() * 22) + ',' + (46 + rnd() * 22) + '%,' +
+                  (20 + rnd() * 26) + '%,' + (0.92 * fall + 0.08) + ')';
+    g.beginPath(); g.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); g.fill();
+    g.restore();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+/* A clump of broad jungle leaves fanning out of one base. Narrow leaflets
+   down a stem read as a conifer from a distance, which is the wrong forest. */
+function broadLeafTexture(hue) {
+  const S = 128, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d'), rnd = mulberry32(hue * 31 + 5);
+  const n = 6;
+  for (let i = 0; i < n; i++) {
+    const fan = (i / (n - 1) - 0.5) * 1.6 + (rnd() - 0.5) * 0.16;
+    const len = S * (0.44 + rnd() * 0.2);
+    g.save();
+    g.translate(S / 2, S - 5);
+    g.rotate(fan);
+    g.fillStyle = 'hsl(' + (hue + rnd() * 18) + ',' + (42 + rnd() * 22) + '%,' +
+                  (22 + rnd() * 22) + '%)';
+    g.beginPath();
+    g.ellipse(0, -len * 0.56, len * 0.29, len * 0.56, 0, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = 'hsla(' + hue + ',38%,14%,.65)'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(0, -len * 1.06); g.stroke();
+    g.restore();
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+/* A butterfly wing: one half, pivoting on its left edge. */
+function wingTexture(hueA, hueB, lit) {
+  const S = 64, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d');
+  g.fillStyle = 'hsl(' + hueA + ',80%,' + lit + '%)';
+  g.beginPath(); g.ellipse(S * 0.42, S * 0.34, S * 0.40, S * 0.30, -0.25, 0, Math.PI * 2); g.fill();
+  g.fillStyle = 'hsl(' + hueB + ',75%,' + (lit - 10) + '%)';
+  g.beginPath(); g.ellipse(S * 0.34, S * 0.70, S * 0.30, S * 0.24, 0.2, 0, Math.PI * 2); g.fill();
+  g.fillStyle = 'rgba(20,10,30,.55)';
+  g.beginPath(); g.ellipse(S * 0.66, S * 0.30, S * 0.10, S * 0.09, 0, 0, Math.PI * 2); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+/* ---------- geometry helpers ---------- */
+function crossedQuads(n) {
+  const pos = [], uv = [], idx = [];
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI, cx = Math.cos(a), sx = Math.sin(a);
+    const corners = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]], base = i * 4;
+    for (const [vx, vy] of corners) pos.push(vx * cx, vy, vx * sx);
+    uv.push(0, 0, 1, 0, 1, 1, 0, 1);
+    idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  const norm = new Float32Array(pos.length);
+  for (let i = 0; i < pos.length; i += 3) {
+    const v = new THREE.Vector3(pos[i], pos[i + 1], pos[i + 2]).normalize();
+    norm[i] = v.x; norm[i + 1] = v.y; norm[i + 2] = v.z;
+  }
+  g.setAttribute('normal', new THREE.BufferAttribute(norm, 3));
+  return g;
+}
+
+/* ---------- canopy-filtered sky ---------- */
+AFRAME.registerComponent('jungle-sky', {
+  init: function () {
+    const c = document.createElement('canvas');
+    c.width = 4; c.height = 256;
+    const g = c.getContext('2d'), grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0.00, '#7ba24e'); grad.addColorStop(0.34, '#4e7a46');
+    grad.addColorStop(0.66, '#33573f'); grad.addColorStop(1.00, '#2f4a3a');
+    g.fillStyle = grad; g.fillRect(0, 0, 4, 256);
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(400, 32, 24),
+      new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, fog: false, depthWrite: false }));
+    mesh.renderOrder = -1;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- forest floor ---------- */
+AFRAME.registerComponent('jungle-floor', {
+  init: function () {
+    const geo = new THREE.PlaneGeometry(300, 300, 160, 160);
+    geo.rotateX(-Math.PI / 2);
+    const p = geo.attributes.position, colors = new Float32Array(p.count * 3);
+    const cMud = new THREE.Color('#3f3120'), cLeaf = new THREE.Color('#26411f'),
+          cMoss = new THREE.Color('#3d5f2c'), tmp = new THREE.Color();
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), z = p.getZ(i), h = terrainH(x, z);
+      p.setY(i, h);
+      /* Silt round the water, moss on the drier rises. */
+      const wet = THREE.MathUtils.clamp((WATER_Y + 0.9 - h) * 0.8, 0, 1);
+      const t = THREE.MathUtils.clamp(fbm(x * 0.11, z * 0.11) * 1.5 - 0.2, 0, 1);
+      tmp.copy(cLeaf).lerp(cMoss, t);
+      tmp.lerp(cMud, wet);
+      colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    mesh.receiveShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- the lagoon ---------- */
+AFRAME.registerComponent('lagoon', {
+  init: function () {
+    const self = this;
+    const geo = new THREE.PlaneGeometry(30, 30, 70, 70);
+    geo.rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshStandardMaterial({
+      color: '#2f6f63', roughness: 0.06, metalness: 0.55,
+      transparent: true, opacity: 0.78
+    });
+    /* Ripples in the vertex shader, with the normal perturbed analytically so
+       the highlights actually travel across the surface. */
+    mat.onBeforeCompile = function (shader) {
+      shader.uniforms.uTime = { value: 0 };
+      shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+         float dx = 0.055 * 0.9 * cos(uTime * 1.30 + position.x * 0.9 + position.z * 0.3);
+         float dz = 0.042 * 1.3 * cos(uTime * 1.75 + position.z * 1.3 - position.x * 0.4);
+         objectNormal = normalize(vec3(-dx, 1.0, -dz));`);
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         transformed.y += 0.055 * sin(uTime * 1.30 + position.x * 0.9 + position.z * 0.3)
+                        + 0.042 * sin(uTime * 1.75 + position.z * 1.3 - position.x * 0.4);`);
+      self.shader = shader;
+    };
+    mat.customProgramCacheKey = function () { return 'lagoon-ripple'; };
+    this.el.setObject3D('mesh', new THREE.Mesh(geo, mat));
+  },
+  tick: function (t) { if (this.shader) this.shader.uniforms.uTime.value = t / 1000; }
+});
+
+/* ---------- a tall jungle tree with buttress roots and hanging vines ------- */
+AFRAME.registerComponent('jungle-tree', {
+  schema: { seed: {default: 1}, height: {default: 12}, radius: {default: 0.42},
+            hue: {default: 110}, canopy: {default: 1} },
+  init: function () {
+    const d = this.data, rnd = mulberry32(d.seed * 7717 + 3);
+    const group = new THREE.Group(), dummy = new THREE.Object3D();
+    const bark = new THREE.MeshLambertMaterial({ color: '#5a4632' });
+
+    /* Trunk: stacked segments that lean a little, so it is not a bare pole. */
+    const segs = 6, lean = new THREE.Vector3((rnd() - 0.5) * 0.5, 0, (rnd() - 0.5) * 0.5);
+    let cursor = new THREE.Vector3(0, 0, 0);
+    const trunk = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.82, 1, 1, 8, 1, true), bark, segs);
+    trunk.castShadow = true; trunk.receiveShadow = true;
+    for (let i = 0; i < segs; i++) {
+      const len = d.height / segs;
+      const next = cursor.clone().add(new THREE.Vector3(lean.x * len * 0.12, len, lean.z * len * 0.12));
+      const rad = d.radius * (1 - i / segs * 0.42);
+      dummy.position.copy(cursor).lerp(next, 0.5);
+      dummy.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0),
+        next.clone().sub(cursor).normalize());
+      dummy.scale.set(rad, len * 1.02, rad);
+      dummy.updateMatrix(); trunk.setMatrixAt(i, dummy.matrix);
+      cursor = next;
+    }
+    group.add(trunk);
+
+    /* Buttress roots flaring out of the base. */
+    const nRoots = 4 + Math.floor(rnd() * 3);
+    const roots = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 5), bark, nRoots);
+    roots.castShadow = true;
+    for (let i = 0; i < nRoots; i++) {
+      const a = (i / nRoots) * Math.PI * 2 + rnd() * 0.5;
+      dummy.position.set(Math.cos(a) * d.radius * 1.5, 0.75, Math.sin(a) * d.radius * 1.5);
+      dummy.rotation.set(0, -a, 0);
+      dummy.scale.set(d.radius * 0.75, 2.1 + rnd() * 0.8, d.radius * 1.9);
+      dummy.updateMatrix(); roots.setMatrixAt(i, dummy.matrix);
+    }
+    group.add(roots);
+
+    /* Canopy: leaf cards bunched round the crown, spilling outward. */
+    const cards = [];
+    const crown = cursor.clone();
+    const nCards = 26 + Math.floor(rnd() * 14);
+    for (let i = 0; i < nCards; i++) {
+      const a = rnd() * Math.PI * 2, r = Math.pow(rnd(), 0.6) * 4.2 * d.canopy;
+      cards.push({
+        pos: crown.clone().add(new THREE.Vector3(
+          Math.cos(a) * r, (rnd() - 0.35) * 2.6, Math.sin(a) * r)),
+        scale: (2.2 + rnd() * 2.4) * d.canopy, rot: rnd() * Math.PI * 2
+      });
+    }
+    const leaves = new THREE.InstancedMesh(crossedQuads(3),
+      new THREE.MeshLambertMaterial({
+        map: leafClusterTexture(d.seed * 13 + 1, d.hue), alphaTest: 0.45,
+        side: THREE.DoubleSide }), cards.length);
+    leaves.castShadow = true;
+    const lc = new THREE.Color();
+    cards.forEach((c, i) => {
+      dummy.position.copy(c.pos); dummy.rotation.set(0, c.rot, 0);
+      dummy.scale.setScalar(c.scale); dummy.updateMatrix();
+      leaves.setMatrixAt(i, dummy.matrix);
+      lc.setHSL(0.25 + (rnd() - 0.5) * 0.06, 0.42 + rnd() * 0.2, 0.42 + rnd() * 0.26);
+      leaves.setColorAt(i, lc);
+    });
+    group.add(leaves);
+
+    /* Lianas dangling out of the crown. */
+    const nVines = 3 + Math.floor(rnd() * 4);
+    const vines = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1, 1, 4),
+      new THREE.MeshLambertMaterial({ color: '#3f5a30' }), nVines);
+    for (let i = 0; i < nVines; i++) {
+      const a = rnd() * Math.PI * 2, r = 1.6 + rnd() * 2.6;
+      const len = 2.5 + rnd() * (d.height * 0.45);
+      dummy.position.set(crown.x + Math.cos(a) * r, crown.y - len / 2 - 0.4,
+                         crown.z + Math.sin(a) * r);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(0.05, len, 0.05);
+      dummy.updateMatrix(); vines.setMatrixAt(i, dummy.matrix);
+    }
+    group.add(vines);
+
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- ferns and undergrowth ---------- */
+AFRAME.registerComponent('undergrowth', {
+  schema: { count: {default: 900}, radius: {default: 32} },
+  init: function () {
+    const rnd = mulberry32(9091), self = this;
+    const mat = new THREE.MeshLambertMaterial({
+      map: broadLeafTexture(104), alphaTest: 0.45, side: THREE.DoubleSide });
+    /* The same wind trick the garden grass uses, slowed down: jungle air is
+       heavy, the fronds should barely stir. */
+    mat.onBeforeCompile = function (shader) {
+      shader.uniforms.uTime = { value: 0 };
+      shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         float wx = instanceMatrix[3][0];
+         float wz = instanceMatrix[3][2];
+         float sway = sin(uTime * 0.8 + wx * 0.4 + wz * 0.3) * 0.3;
+         float h = clamp(uv.y, 0.0, 1.0);
+         transformed.x += sway * h * h * 0.3;
+         transformed.z += sway * h * h * 0.16;`);
+      self.shader = shader;
+    };
+    mat.customProgramCacheKey = function () { return 'frond-wind'; };
+    const geo = new THREE.PlaneGeometry(1, 1, 1, 3);
+    geo.translate(0, 0.5, 0);
+    const mesh = new THREE.InstancedMesh(geo, mat, this.data.count * 2);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    let placed = 0;
+    for (let i = 0; i < this.data.count; i++) {
+      const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * this.data.radius;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const h = terrainH(x, z);
+      if (h < WATER_Y + 0.15) continue;          /* nothing grows in the lagoon */
+      const s = 0.55 + rnd() * 0.8;
+      /* Two crossed fronds per clump reads much fuller than one. */
+      for (let k = 0; k < 2; k++) {
+        dummy.position.set(x, h - 0.05, z);
+        dummy.rotation.set(0, rnd() * Math.PI + k * 1.2, 0);
+        dummy.scale.set(s, s * (0.8 + rnd() * 0.5), s);
+        dummy.updateMatrix();
+        mesh.setMatrixAt(placed, dummy.matrix);
+        col.setHSL(0.27 + rnd() * 0.06, 0.45 + rnd() * 0.2, 0.3 + rnd() * 0.22);
+        mesh.setColorAt(placed, col);
+        placed++;
+      }
+    }
+    mesh.count = placed; mesh.frustumCulled = false;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) { if (this.shader) this.shader.uniforms.uTime.value = t / 1000; }
+});
+
+/* ---------- flying creatures ----------------------------------------------
+   Two wings per animal, each a quad pivoting on its inner edge, so the flap is
+   real geometry rather than a texture trick. Butterflies and birds are the
+   same component with different numbers.                                     */
+AFRAME.registerComponent('flock', {
+  schema: {
+    count:   {default: 16},
+    size:    {default: 0.34},
+    low:     {default: 1.2},
+    high:    {default: 3.4},
+    spread:  {default: 26},
+    speed:   {default: 0.55},
+    flap:    {default: 9},
+    flapAmt: {default: 1.05},
+    hueA:    {default: 28},
+    hueB:    {default: 300},
+    lit:     {default: 62},
+    seed:    {default: 5}
+  },
+  init: function () {
+    const d = this.data, rnd = mulberry32(d.seed * 131 + 7);
+    const geo = new THREE.PlaneGeometry(1, 0.72);
+    geo.translate(0.5, 0, 0);                    /* pivot on the body side */
+    const mesh = new THREE.InstancedMesh(geo,
+      new THREE.MeshLambertMaterial({
+        map: wingTexture(d.hueA, d.hueB, d.lit), alphaTest: 0.4,
+        side: THREE.DoubleSide }), d.count * 2);
+    mesh.frustumCulled = false;
+    this.birds = [];
+    for (let i = 0; i < d.count; i++) {
+      this.birds.push({
+        cx: (rnd() - 0.5) * d.spread, cz: (rnd() - 0.5) * d.spread - 8,
+        r: 1.5 + rnd() * 5, phase: rnd() * Math.PI * 2,
+        speed: d.speed * (0.6 + rnd() * 0.8),
+        bob: 0.3 + rnd() * 0.8, y: d.low + rnd() * (d.high - d.low),
+        size: d.size * (0.75 + rnd() * 0.5), flapPhase: rnd() * 6
+      });
+    }
+    this.dummy = new THREE.Object3D();
+    this.dummy.rotation.order = 'YXZ';
+    this.mesh = mesh;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) {
+    if (!this.mesh) { return; }
+    const time = t / 1000, d = this.data, dummy = this.dummy;
+    for (let i = 0; i < this.birds.length; i++) {
+      const b = this.birds[i];
+      const a = b.phase + time * b.speed;
+      const x = b.cx + Math.cos(a) * b.r;
+      const z = b.cz + Math.sin(a) * b.r;
+      const y = b.y + Math.sin(time * 0.9 + b.phase) * b.bob;
+      /* Heading is the tangent of the circle it is riding. */
+      const heading = -a + Math.PI / 2;
+      const flapAngle = Math.sin(time * d.flap + b.flapPhase) * d.flapAmt;
+      for (let w = 0; w < 2; w++) {
+        const mirror = w === 0 ? 1 : -1;
+        dummy.position.set(x, y, z);
+        dummy.rotation.set(0, heading, flapAngle * mirror);
+        dummy.scale.set(b.size * mirror, b.size, b.size);
+        dummy.updateMatrix();
+        this.mesh.setMatrixAt(i * 2 + w, dummy.matrix);
+      }
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+});
+
+/* ---------- fish under the lagoon surface ---------- */
+AFRAME.registerComponent('fish-school', {
+  schema: { count: {default: 15} },
+  init: function () {
+    const rnd = mulberry32(661);
+    const geo = new THREE.SphereGeometry(1, 8, 6);
+    geo.scale(0.35, 0.22, 0.75);
+    const mesh = new THREE.InstancedMesh(geo,
+      new THREE.MeshLambertMaterial({ color: '#d8b463', emissive: '#4a3a12',
+        emissiveIntensity: 0.6 }), this.data.count);
+    mesh.frustumCulled = false;
+    this.fish = [];
+    for (let i = 0; i < this.data.count; i++) {
+      this.fish.push({
+        r: 1.4 + rnd() * (LAGOON.r - 3), phase: rnd() * Math.PI * 2,
+        speed: (0.25 + rnd() * 0.4) * (rnd() < 0.5 ? -1 : 1),
+        depth: 0.3 + rnd() * 0.75, size: 0.5 + rnd() * 0.6, wob: rnd() * 4
+      });
+    }
+    this.dummy = new THREE.Object3D();
+    this.mesh = mesh;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) {
+    if (!this.mesh) { return; }
+    const time = t / 1000, dummy = this.dummy;
+    for (let i = 0; i < this.fish.length; i++) {
+      const f = this.fish[i];
+      const a = f.phase + time * f.speed;
+      dummy.position.set(
+        LAGOON.x + Math.cos(a) * f.r,
+        WATER_Y - f.depth + Math.sin(time * 0.8 + f.wob) * 0.12,
+        LAGOON.z + Math.sin(a) * f.r);
+      /* Face along the swim, with a tail-flick wobble. */
+      dummy.rotation.set(0, -a + (f.speed > 0 ? 0 : Math.PI),
+        Math.sin(time * 5 + f.wob) * 0.18);
+      dummy.scale.setScalar(f.size);
+      dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, dummy.matrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+});
+
+/* ---------- the wall of forest around the hollow --------------------------
+   Built as two instanced meshes for the whole ring rather than one entity per
+   tree: a wall dense enough to be solid is far too many trees to afford at
+   four draw calls each.                                                      */
+AFRAME.registerComponent('forest-wall', {
+  schema: { inner: {default: WALL_R}, thickness: {default: 12}, trunks: {default: 175} },
+  init: function () {
+    const d = this.data, rnd = mulberry32(8642);
+    const group = new THREE.Group(), dummy = new THREE.Object3D(), col = new THREE.Color();
+
+    const trunks = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.62, 1, 1, 6, 1, true),
+      new THREE.MeshLambertMaterial({ color: '#5a4632', side: THREE.DoubleSide }),
+      d.trunks);
+    trunks.castShadow = true;
+
+    const cards = [];
+    for (let i = 0; i < d.trunks; i++) {
+      /* Even spacing with jitter: purely random angles leave gaps you can see
+         the empty world through. */
+      const a = (i / d.trunks) * Math.PI * 2 + (rnd() - 0.5) * 0.2;
+      const r = d.inner + rnd() * d.thickness;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const h = terrainH(x, z);
+      const ht = 11 + rnd() * 11, rad = 0.3 + rnd() * 0.32;
+      dummy.position.set(x, h + ht / 2, z);
+      dummy.rotation.set(0, rnd() * 3, 0);
+      dummy.scale.set(rad, ht, rad);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+
+      for (let k = 0, n = 5 + Math.floor(rnd() * 4); k < n; k++) {
+        cards.push({ x: x + (rnd() - 0.5) * 5.5, y: h + ht * (0.7 + rnd() * 0.42),
+                     z: z + (rnd() - 0.5) * 5.5, s: 3.2 + rnd() * 4.2,
+                     rot: rnd() * Math.PI * 2 });
+      }
+      /* Low growth too, or you can see straight out between the trunks. */
+      for (let k = 0, m = 4 + Math.floor(rnd() * 3); k < m; k++) {
+        cards.push({ x: x + (rnd() - 0.5) * 4.5, y: h + 0.7 + rnd() * 4,
+                     z: z + (rnd() - 0.5) * 4.5, s: 2.2 + rnd() * 2.8,
+                     rot: rnd() * Math.PI * 2 });
+      }
+    }
+    group.add(trunks);
+
+    const leaves = new THREE.InstancedMesh(crossedQuads(3),
+      new THREE.MeshLambertMaterial({
+        map: leafClusterTexture(91, 112), alphaTest: 0.45,
+        side: THREE.DoubleSide }), cards.length);
+    leaves.castShadow = true;
+    cards.forEach(function (c, i) {
+      dummy.position.set(c.x, c.y, c.z);
+      dummy.rotation.set(0, c.rot, 0);
+      dummy.scale.setScalar(c.s);
+      dummy.updateMatrix();
+      leaves.setMatrixAt(i, dummy.matrix);
+      col.setHSL(0.25 + (rnd() - 0.5) * 0.06, 0.42 + rnd() * 0.2, 0.3 + rnd() * 0.24);
+      leaves.setColorAt(i, col);
+    });
+    leaves.frustumCulled = false;
+    group.add(leaves);
+
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- the canopy overhead ------------------------------------------
+   Horizontal leaf cards well above the crowns. Without this you look up out of
+   a jungle into open sky, which is what gives the whole scene away.          */
+AFRAME.registerComponent('canopy-ceiling', {
+  schema: { count: {default: 210}, radius: {default: 78}, y: {default: 19} },
+  init: function () {
+    const d = this.data, rnd = mulberry32(5150);
+    const mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshLambertMaterial({
+        map: leafClusterTexture(77, 108), alphaTest: 0.42,
+        side: THREE.DoubleSide }), d.count);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    for (let i = 0; i < d.count; i++) {
+      const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * d.radius;
+      dummy.position.set(Math.cos(a) * r, d.y + (rnd() - 0.5) * 7, Math.sin(a) * r - 6);
+      /* Lie flat, with enough tilt that the layer does not read as a lid. */
+      dummy.rotation.set(-Math.PI / 2 + (rnd() - 0.5) * 0.7, rnd() * Math.PI * 2,
+                         (rnd() - 0.5) * 0.7);
+      dummy.scale.setScalar(6 + rnd() * 9);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      col.setHSL(0.25 + (rnd() - 0.5) * 0.05, 0.4 + rnd() * 0.2, 0.22 + rnd() * 0.2);
+      mesh.setColorAt(i, col);
+    }
+    mesh.frustumCulled = false;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- shafts of light through the canopy ---------- */
+AFRAME.registerComponent('god-rays', {
+  init: function () {
+    const rnd = mulberry32(1212), group = new THREE.Group();
+    const mat = new THREE.MeshBasicMaterial({
+      color: '#dff3a8', transparent: true, opacity: 0.055,
+      depthWrite: false, side: THREE.DoubleSide, fog: false, blending: THREE.AdditiveBlending });
+    for (let i = 0; i < 7; i++) {
+      const a = rnd() * Math.PI * 2, r = 6 + rnd() * 22;
+      const m = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 12, 1, true), mat);
+      m.position.set(Math.cos(a) * r, 9, Math.sin(a) * r - 6);
+      m.scale.set(1.0 + rnd() * 1.4, 20, 1.0 + rnd() * 1.4);
+      m.rotation.set(0.13 + rnd() * 0.1, rnd() * 3, 0.1 - rnd() * 0.2);
+      m.renderOrder = 2;
+      group.add(m);
+    }
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- keep the camera on the ground, wading through shallows ---------- */
+AFRAME.registerComponent('jungle-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    /* Hold the player inside the hollow, short of the thicket. */
+    const d = Math.hypot(p.x, p.z);
+    if (d > WALK_R) { p.x *= WALK_R / d; p.z *= WALK_R / d; }
+    /* Do not let the player sink out of sight in the lagoon. */
+    const ground = Math.max(terrainH(p.x, p.z), WATER_Y - 0.55);
+    p.y = ground + this.data.height;
+  }
+});
+
+/* ---------- scatter the forest ---------- */
+AFRAME.registerComponent('populate', {
+  init: function () {
+    const rnd = mulberry32(31337);
+    const spots = [];
+    /* A ring of big trees round the clearing, then filler further out. */
+    for (let i = 0; i < 70; i++) {
+      /* All inside the wall — trees beyond it were never visible anyway. */
+      const a = rnd() * Math.PI * 2, r = 8 + Math.sqrt(rnd()) * 20;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r - 4;
+      if (Math.hypot(x - LAGOON.x, z - LAGOON.z) < LAGOON.r + 3) continue;
+      /* Keep the arrival spot and the way back clear. */
+      if (Math.hypot(x, z - 8) < 5) continue;
+      if (Math.hypot(x, z - 12) < 4) continue;
+      spots.push({ x: x, z: z, seed: i * 7 + 2,
+                   h: 10 + rnd() * 11, r: 0.34 + rnd() * 0.32,
+                   hue: 96 + rnd() * 34, canopy: 0.85 + rnd() * 0.6 });
+    }
+    for (const s of spots) {
+      const e = document.createElement('a-entity');
+      e.setAttribute('position', s.x + ' ' + terrainH(s.x, s.z) + ' ' + s.z);
+      e.setAttribute('jungle-tree', 'seed: ' + s.seed + '; height: ' + s.h.toFixed(2) +
+        '; radius: ' + s.r.toFixed(2) + '; hue: ' + s.hue.toFixed(0) +
+        '; canopy: ' + s.canopy.toFixed(2));
+      this.el.appendChild(e);
+    }
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Jungle Hollow</b><br>WASD / arrows to walk &middot; drag to look &middot; the lagoon is wadeable</div>
+
+<a-scene fog="type: exponential; color: #2f4a3a; density: 0.016"
+         shadow="type: pcfsoft"
+         renderer="colorManagement: true; antialias: true"
+         ambience="src: sounds/soul_serenity_sounds-jungle-nature-229896.mp3; volume: 0.45"
+         populate>
+
+  <a-entity jungle-sky></a-entity>
+
+  <a-entity light="type: hemisphere; color: #a9c99b; groundColor: #23381d; intensity: 0.7"></a-entity>
+  <a-entity position="26 52 18"
+    light="type: directional; color: #fff3cc; intensity: 1.0; castShadow: true;
+           shadowMapWidth: 2048; shadowMapHeight: 2048;
+           shadowCameraLeft: -45; shadowCameraRight: 45;
+           shadowCameraTop: 45; shadowCameraBottom: -45;
+           shadowCameraFar: 200; shadowBias: -0.0012"></a-entity>
+
+  <a-entity jungle-floor></a-entity>
+  <a-entity undergrowth></a-entity>
+  <a-entity forest-wall></a-entity>
+  <a-entity canopy-ceiling></a-entity>
+  <a-entity god-rays></a-entity>
+
+  <a-entity position="0 0 -15" lagoon></a-entity>
+  <a-entity fish-school></a-entity>
+
+  <!-- Butterflies low among the ferns, birds wheeling up near the canopy. -->
+  <a-entity flock="count: 22; size: 0.32; low: 0.9; high: 2.8; spread: 30;
+                   speed: 0.6; flap: 10; flapAmt: 1.1; hueA: 32; hueB: 288;
+                   lit: 62; seed: 5"></a-entity>
+  <a-entity flock="count: 9; size: 1.15; low: 12; high: 17; spread: 46;
+                   speed: 0.32; flap: 2.6; flapAmt: 0.7; hueA: 210; hueB: 205;
+                   lit: 26; seed: 19"></a-entity>
+
+  <!-- Fireflies, reusing the hub's point-cloud component. -->
+  <a-entity position="0 2 -8"
+            starfield="count: 150; shape: volume; extent: 46 5 46; size: 0.09;
+                       spin: 0.006; rise: 0.14; palette: #d8ff8a,#fff0a0,#a8ff9c"></a-entity>
+
+  <a-entity id="rig" position="0 1.6 8" jungle-walk
+            wasd-controls="acceleration: 42" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="600" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Way back to the hub room: turn around from the starting spot. -->
+  <a-entity position="0 0 12" rotation="0 180 0">
+    <a-box position="0 1.5 0" width="2.3" height="3.2" depth="0.3"
+           material="color: #4a3a26; roughness: 0.9" shadow="cast: true"></a-box>
+    <a-box class="portal" position="0 1.4 0.2" width="1.7" height="2.6" depth="0.1"
+           material="shader: flat"
+           portal="href: index.html; color: #cfe8b8; hover: #ecffd8"></a-box>
+    <a-text value="Back to the hub" align="center" width="4" color="#e7f7d8"
+            position="0 3.3 0.25"></a-text>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

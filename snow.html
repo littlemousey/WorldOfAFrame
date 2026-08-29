@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Snow Peaks</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/portal.js"></script>
+<script src="js/ambience.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(22,34,52,.62); color: #e6f0fb; padding: 10px 14px;
+    border: 1px solid rgba(190,215,245,.3); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #ffffff; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+
+/* A sheltered valley floor, walled in by peaks that climb steeply past the
+   rim. The mountains ARE the boundary — the clamp just stops you short. */
+const VALLEY_R = 24;
+const WALK_R = 26;
+const LAKE = { x: -3, z: -14, r: 7.5 };
+const ICE_Y = -0.55;
+
+function lakeMask(x, z) {
+  const d = Math.hypot(x - LAKE.x, z - LAKE.z);
+  return 1 - THREE.MathUtils.smoothstep(d, 3, LAKE.r + 2);
+}
+function terrainH(x, z) {
+  const d = Math.hypot(x, z);
+  const gentle = ((fbm(x * 0.035, z * 0.035) - 0.5) * 5 +
+                  (fbm(x * 0.11, z * 0.11) - 0.5) * 0.9)
+                 * THREE.MathUtils.smoothstep(d, 5, VALLEY_R);
+  /* Ridged noise: folding the fbm about 0.5 turns rounded hills into the sharp
+     crests and gullies that read as mountains. */
+  const ridged = Math.pow(1 - Math.abs(fbm(x * 0.013 + 3, z * 0.013 + 7) - 0.5) * 2, 1.6);
+  const rim = THREE.MathUtils.smoothstep(d, VALLEY_R, 78);
+  const m = lakeMask(x, z);
+  const h = gentle + rim * (20 + ridged * 58) - m * 1.4;
+  return m < 0.03 ? Math.max(h, ICE_Y + 0.2) : h;
+}
+
+/* How steeply the ground falls away here. Anything planted on a near-vertical
+   mountainside stands vertically out of it and reads as floating. */
+function slopeAt(x, z) {
+  const e = 1.2;
+  const hx = terrainH(x + e, z) - terrainH(x - e, z);
+  const hz = terrainH(x, z + e) - terrainH(x, z - e);
+  return Math.hypot(hx, hz) / (2 * e);
+}
+
+/* ---------- cold sky with a low sun ---------- */
+AFRAME.registerComponent('alpine-sky', {
+  init: function () {
+    const c = document.createElement('canvas');
+    c.width = 4; c.height = 256;
+    const g = c.getContext('2d'), grad = g.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0.00, '#2b5c94'); grad.addColorStop(0.38, '#7fb2dc');
+    grad.addColorStop(0.70, '#cfe0ee'); grad.addColorStop(0.88, '#f6dcc8');
+    grad.addColorStop(1.00, '#e8c4b0');
+    g.fillStyle = grad; g.fillRect(0, 0, 4, 256);
+    const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(500, 32, 24),
+      new THREE.MeshBasicMaterial({ map: tex, side: THREE.BackSide, fog: false,
+        depthWrite: false }));
+    mesh.renderOrder = -1;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- the mountains ---------- */
+AFRAME.registerComponent('snow-terrain', {
+  init: function () {
+    const SIZE = 380, SEG = 170;
+    const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG);
+    geo.rotateX(-Math.PI / 2);
+    const p = geo.attributes.position;
+
+    /* Sample the height field once into a grid, then read slope from
+       neighbouring samples. Calling terrainH per neighbour per vertex is the
+       same noise evaluated five times over and is far too slow. */
+    const n = SEG + 1, heights = new Float32Array(p.count);
+    for (let i = 0; i < p.count; i++) {
+      heights[i] = terrainH(p.getX(i), p.getZ(i));
+      p.setY(i, heights[i]);
+    }
+
+    const step = SIZE / SEG;
+    const colors = new Float32Array(p.count * 3);
+    const cSnow = new THREE.Color('#f2f7fd'), cShade = new THREE.Color('#c3d6ea'),
+          cRock = new THREE.Color('#5d5a66'), tmp = new THREE.Color();
+    for (let iy = 0; iy < n; iy++) {
+      for (let ix = 0; ix < n; ix++) {
+        const i = iy * n + ix;
+        const hx = heights[iy * n + Math.min(ix + 1, n - 1)] -
+                   heights[iy * n + Math.max(ix - 1, 0)];
+        const hz = heights[Math.min(iy + 1, n - 1) * n + ix] -
+                   heights[Math.max(iy - 1, 0) * n + ix];
+        const slope = Math.hypot(hx, hz) / (2 * step);
+        /* Snow settles on the flat; bare rock shows on anything steep. */
+        const rock = THREE.MathUtils.smoothstep(slope, 0.62, 1.15);
+        tmp.copy(cSnow).lerp(cShade, THREE.MathUtils.clamp(slope * 0.5, 0, 0.6));
+        tmp.lerp(cRock, rock);
+        colors[i * 3] = tmp.r; colors[i * 3 + 1] = tmp.g; colors[i * 3 + 2] = tmp.b;
+      }
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    mesh.receiveShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- snow-laden conifers -------------------------------------------
+   Three stacked cones per tree in one instanced mesh, with a second mesh of
+   white caps sitting on each tier — the whole forest in three draw calls.   */
+AFRAME.registerComponent('pine-forest', {
+  schema: { count: {default: 170}, radius: {default: 30} },
+  init: function () {
+    const rnd = mulberry32(3141), d = this.data;
+    const group = new THREE.Group(), dummy = new THREE.Object3D(), col = new THREE.Color();
+    const tiers = 3;
+
+    const trunks = new THREE.InstancedMesh(
+      new THREE.CylinderGeometry(0.7, 1, 1, 5),
+      new THREE.MeshLambertMaterial({ color: '#4a3a2e' }), d.count);
+    const needles = new THREE.InstancedMesh(
+      new THREE.ConeGeometry(1, 1, 7),
+      new THREE.MeshLambertMaterial({ color: '#ffffff' }), d.count * tiers);
+    const caps = new THREE.InstancedMesh(
+      new THREE.ConeGeometry(1, 1, 7),
+      new THREE.MeshLambertMaterial({ color: '#eef5fc' }), d.count * tiers);
+    trunks.castShadow = needles.castShadow = true;
+
+    let placed = 0, part = 0;
+    for (let i = 0; i < d.count; i++) {
+      const a = rnd() * Math.PI * 2, r = 5 + Math.sqrt(rnd()) * d.radius;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const h = terrainH(x, z);
+      if (h < ICE_Y + 0.3) continue;               /* nothing grows on the ice */
+      if (slopeAt(x, z) > 0.5) continue;           /* nor on the cliffs */
+      if (Math.hypot(x, z - 9) < 4.5) continue;    /* keep the arrival spot clear */
+      if (Math.hypot(x, z - 13) < 3.5) continue;   /* and the way back */
+
+      const ht = 3.2 + rnd() * 4.4, rad = 0.75 + rnd() * 0.5;
+      dummy.position.set(x, h + 0.4, z);
+      dummy.rotation.set(0, rnd() * 3, 0);
+      dummy.scale.set(rad * 0.16, 1.1, rad * 0.16);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(placed, dummy.matrix);
+
+      for (let t = 0; t < tiers; t++) {
+        const f = t / tiers;
+        const tierH = ht * (0.46 - f * 0.1);
+        const tierR = rad * (1 - f * 0.34);
+        const y = h + 0.7 + ht * f * 0.62;
+        dummy.position.set(x, y + tierH / 2, z);
+        dummy.rotation.set(0, rnd() * 3, 0);
+        dummy.scale.set(tierR, tierH, tierR);
+        dummy.updateMatrix();
+        needles.setMatrixAt(part, dummy.matrix);
+        col.setHSL(0.36 + rnd() * 0.05, 0.3 + rnd() * 0.16, 0.13 + rnd() * 0.09);
+        needles.setColorAt(part, col);
+
+        /* Snow sits on the upper half of each tier: a shorter, slightly wider
+           cone pushed up so only its skirt shows past the green. */
+        dummy.position.set(x, y + tierH * 0.62, z);
+        dummy.scale.set(tierR * 0.94, tierH * 0.55, tierR * 0.94);
+        dummy.updateMatrix();
+        caps.setMatrixAt(part, dummy.matrix);
+        part++;
+      }
+      placed++;
+    }
+    trunks.count = placed;
+    needles.count = caps.count = part;
+    group.add(trunks); group.add(needles); group.add(caps);
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- boulders breaking through the drifts ---------- */
+AFRAME.registerComponent('snow-rocks', {
+  schema: { count: {default: 110} },
+  init: function () {
+    const rnd = mulberry32(9021);
+    const mesh = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 0),
+      new THREE.MeshLambertMaterial({ color: '#ffffff' }), this.data.count);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    let placed = 0;
+    for (let i = 0; i < this.data.count; i++) {
+      const a = rnd() * Math.PI * 2, r = 4 + Math.sqrt(rnd()) * 28;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const h = terrainH(x, z);
+      if (h < ICE_Y + 0.2) continue;
+      if (slopeAt(x, z) > 0.7) continue;           /* no boulders on the cliffs */
+      if (Math.hypot(x, z - 9) < 4) continue;
+      const s = 0.35 + rnd() * 1.9;
+      /* Sunk deep: half-buried rock reads as snow drifted up against it. */
+      dummy.position.set(x, h + s * 0.22, z);
+      dummy.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
+      dummy.scale.set(s * (0.9 + rnd() * 0.5), s * (0.5 + rnd() * 0.4),
+                      s * (0.9 + rnd() * 0.5));
+      dummy.updateMatrix();
+      mesh.setMatrixAt(placed, dummy.matrix);
+      col.setHSL(0.62, 0.06 + rnd() * 0.08, 0.34 + rnd() * 0.24);
+      mesh.setColorAt(placed, col);
+      placed++;
+    }
+    mesh.count = placed;
+    mesh.frustumCulled = false;
+    mesh.receiveShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- falling snow ---------- */
+AFRAME.registerComponent('snowfall', {
+  schema: { count: {default: 900}, extent: {default: 60}, top: {default: 22} },
+  init: function () {
+    const rnd = mulberry32(555), d = this.data;
+    this.mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.075, 0.075),
+      new THREE.MeshBasicMaterial({ color: '#ffffff', side: THREE.DoubleSide,
+        transparent: true, opacity: 0.92 }), d.count);
+    this.mesh.frustumCulled = false;
+    this.flakes = [];
+    for (let i = 0; i < d.count; i++) {
+      this.flakes.push({
+        x: (rnd() - 0.5) * d.extent, y: rnd() * d.top, z: (rnd() - 0.5) * d.extent,
+        fall: 0.5 + rnd() * 1.1, phase: rnd() * 10,
+        drift: 0.3 + rnd() * 0.7, spin: 0.5 + rnd() * 2
+      });
+    }
+    this.dummy = new THREE.Object3D();
+    this.el.setObject3D('mesh', this.mesh);
+  },
+  tick: function (t, dt) {
+    if (!dt || !this.mesh) { return; }
+    const s = Math.min(dt, 100) / 1000, time = t / 1000, d = this.data;
+    for (let i = 0; i < this.flakes.length; i++) {
+      const f = this.flakes[i];
+      f.y -= f.fall * s;
+      f.x += Math.sin(time * 0.6 + f.phase) * f.drift * s;
+      f.z += Math.cos(time * 0.45 + f.phase) * f.drift * s;
+      /* Recycle at the ground, not at the terrain height: close enough at this
+         size, and it keeps the whole field to one cheap comparison. */
+      if (f.y < -2) {
+        f.y = d.top;
+        f.x = (Math.random() - 0.5) * d.extent;
+        f.z = (Math.random() - 0.5) * d.extent;
+      }
+      this.dummy.position.set(f.x, f.y, f.z);
+      this.dummy.rotation.set(time * f.spin, time * f.spin * 0.7 + f.phase, 0);
+      this.dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, this.dummy.matrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+});
+
+/* ---------- keep the camera on the snow, inside the valley ---------- */
+AFRAME.registerComponent('snow-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    const d = Math.hypot(p.x, p.z);
+    if (d > WALK_R) { p.x *= WALK_R / d; p.z *= WALK_R / d; }
+    p.y = terrainH(p.x, p.z) + this.data.height;
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Snow Peaks</b><br>WASD / arrows to walk &middot; drag to look</div>
+
+<a-scene fog="type: exponential; color: #d3e2f0; density: 0.012"
+         shadow="type: pcfsoft"
+         renderer="colorManagement: true; antialias: true"
+         ambience="src: sounds/mightuser-sound-of-howling-wind-through-a-mountain-pass-hd-261324.mp3; volume: 0.4">
+
+  <a-entity alpine-sky></a-entity>
+
+  <a-entity light="type: hemisphere; color: #cfe4ff; groundColor: #dbe8f4; intensity: 0.85"></a-entity>
+  <!-- Low sun, for long blue shadows across the snow. -->
+  <a-entity position="-46 26 30"
+    light="type: directional; color: #ffe9d0; intensity: 1.15; castShadow: true;
+           shadowMapWidth: 2048; shadowMapHeight: 2048;
+           shadowCameraLeft: -45; shadowCameraRight: 45;
+           shadowCameraTop: 45; shadowCameraBottom: -45;
+           shadowCameraFar: 200; shadowBias: -0.0012"></a-entity>
+
+  <a-entity snow-terrain></a-entity>
+  <a-entity pine-forest></a-entity>
+  <a-entity snow-rocks></a-entity>
+
+  <!-- A frozen tarn: barely rippled, so it mirrors the peaks. -->
+  <a-circle position="-3 -0.55 -14" radius="7.5" rotation="-90 0 0"
+            material="color: #9fc4dd; roughness: 0.12; metalness: 0.3;
+                      opacity: 0.94; transparent: true"></a-circle>
+
+  <a-entity position="0 6 0" snowfall></a-entity>
+
+  <a-entity id="rig" position="0 1.6 9" snow-walk
+            wasd-controls="acceleration: 40" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="700" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"
+                color="#2b5c94"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Way back to the hub room: turn around from the starting spot. -->
+  <a-entity position="0 0 13" rotation="0 180 0">
+    <a-box position="0 1.5 0" width="2.3" height="3.2" depth="0.3"
+           material="color: #4a4f5c; roughness: 0.9" shadow="cast: true"></a-box>
+    <a-box class="portal" position="0 1.4 0.2" width="1.7" height="2.6" depth="0.1"
+           material="shader: flat"
+           portal="href: index.html; color: #bcd9f0; hover: #eaf5ff"></a-box>
+    <a-text value="Back to the hub" align="center" width="4" color="#eaf5ff"
+            position="0 3.3 0.25"></a-text>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>
