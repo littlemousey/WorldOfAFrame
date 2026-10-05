@@ -55,7 +55,7 @@ js/ambience.js          looping background sound, with a mute button
 
 img/                    the hub's floor texture, plus christmas.html's textures
 objects/                models, used only by christmas.html
-sounds/                 ambience  ·  sound/  the original Jingle Bells
+sounds/                 ambience, plus christmas.html's Jingle Bells
 ```
 
 Where it is going next — a branching maze where one door commits you to a whole
