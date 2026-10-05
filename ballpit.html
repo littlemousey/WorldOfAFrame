@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Ball Pit Sky</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/portal.js"></script>
+<script src="js/ambience.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(20,60,120,.55); color: #eaf6ff; padding: 10px 14px;
+    border: 1px solid rgba(200,230,255,.35); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #ffffff; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* The pit: a round padded tub floating in open sky. You stand in it. */
+const PIT_R = 12;
+const WALK_R = PIT_R - 1.4;
+/* Where the top of the pile of balls sits. */
+const PILE_Y = 0;
+/* Classic ball-pit plastic. */
+const BALL_COLORS = ['#e8322f', '#ffd21f', '#2a6fdb', '#2fb84a',
+                     '#ff8a1f', '#8e44c9', '#ff5fa8', '#1fc4d6'];
+
+function pickColor(rnd, col) { return col.set(BALL_COLORS[Math.floor(rnd() * BALL_COLORS.length)]); }
+
+/* Shiny plastic: Phong gives the tight highlight a ball-pit ball has. */
+function ballMaterial() {
+  return new THREE.MeshPhongMaterial({ color: '#ffffff', shininess: 90, specular: '#5a5a5a' });
+}
+
+/* ---------- the sky: blue overhead, paler at the horizon, all the way round,
+   since the pit floats and you can look down past its edge too ---------- */
+AFRAME.registerComponent('blue-sky', {
+  init: function () {
+    const mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      vertexShader: `
+        varying vec3 vDir;
+        void main() {
+          vDir = (modelMatrix * vec4(position, 1.0)).xyz - cameraPosition;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        varying vec3 vDir;
+        void main() {
+          vec3 d = normalize(vDir);
+          vec3 zenith  = vec3(0.16, 0.47, 0.90);
+          vec3 horizon = vec3(0.75, 0.89, 1.00);
+          vec3 below   = vec3(0.45, 0.70, 0.97);
+          vec3 col = d.y > 0.0 ? mix(horizon, zenith, pow(d.y, 0.55))
+                               : mix(horizon, below, pow(-d.y, 0.7));
+          /* A soft sun, off to one side. */
+          vec3 sun = normalize(vec3(0.45, 0.62, -0.64));
+          float s = max(dot(d, sun), 0.0);
+          col += vec3(1.0, 0.95, 0.8) * (pow(s, 600.0) * 1.2 + pow(s, 12.0) * 0.18);
+          gl_FragColor = vec4(min(col, 1.0), 1.0);
+        }`
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(500, 48, 24), mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -1;
+    this.el.setObject3D('mesh', mesh);
+  },
+  /* Keep the sky centred on the viewer, so it is always infinitely far away. */
+  tick: function () {
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+  }
+});
+
+/* ---------- puffy clouds, built out of white spheres ---------- */
+AFRAME.registerComponent('puff-clouds', {
+  schema: { count: {default: 22}, seed: {default: 7} },
+  init: function () {
+    const rnd = mulberry32(this.data.seed), puffs = [];
+    for (let c = 0; c < this.data.count; c++) {
+      const a = rnd() * Math.PI * 2, d = 45 + rnd() * 110;
+      const cx = Math.cos(a) * d, cz = Math.sin(a) * d, cy = -35 + rnd() * 75;
+      const size = 3 + rnd() * 5, n = 6 + Math.floor(rnd() * 6);
+      for (let i = 0; i < n; i++) {
+        const along = (i / (n - 1) - 0.5) * size * 2.6;
+        const r = size * (0.55 + rnd() * 0.5) * (1 - Math.abs(along) / (size * 2.4));
+        puffs.push({ x: cx + along * Math.cos(a + 1.57), y: cy + (rnd() - 0.3) * size * 0.5,
+                     z: cz + along * Math.sin(a + 1.57) + (rnd() - 0.5) * size, r: Math.max(r, size * 0.35) });
+      }
+    }
+    const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 16, 12),
+      new THREE.MeshLambertMaterial({ color: '#ffffff', emissive: '#c8dcf0', emissiveIntensity: 0.4 }),
+      puffs.length);
+    const dummy = new THREE.Object3D();
+    puffs.forEach((p, i) => {
+      dummy.position.set(p.x, p.y, p.z);
+      dummy.scale.set(p.r, p.r * 0.72, p.r);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+    });
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- the pit itself: padded rim, a cloud underneath, and the pile of
+   balls you wade through ---------- */
+AFRAME.registerComponent('ball-pit', {
+  init: function () {
+    const rnd = mulberry32(2024), group = new THREE.Group();
+    const col = new THREE.Color(), dummy = new THREE.Object3D();
+
+    /* The pile: hex-packed balls with a little jitter, then a scatter of
+       loose ones lying on top so the surface is not a tidy grid. */
+    const R = 0.22, step = R * 1.86, pile = [];
+    for (let row = -PIT_R / step; row <= PIT_R / step; row++) {
+      const z = row * step * 0.866;
+      for (let x = -PIT_R + (row & 1) * step / 2; x <= PIT_R; x += step) {
+        if (Math.hypot(x, z) > PIT_R - 0.05) continue;
+        pile.push([x + (rnd() - 0.5) * 0.06, PILE_Y - R * 0.6 + (rnd() - 0.5) * 0.08,
+                   z + (rnd() - 0.5) * 0.06]);
+      }
+    }
+    for (let i = 0; i < 900; i++) {
+      const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * (PIT_R - 0.4);
+      pile.push([Math.cos(a) * d, PILE_Y - R * 0.05 + rnd() * 0.08, Math.sin(a) * d]);
+    }
+    const balls = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(R, 2), ballMaterial(), pile.length);
+    balls.receiveShadow = true;
+    pile.forEach((p, i) => {
+      dummy.position.set(p[0], p[1], p[2]);
+      dummy.updateMatrix();
+      balls.setMatrixAt(i, dummy.matrix);
+      balls.setColorAt(i, pickColor(rnd, col));
+    });
+    group.add(balls);
+
+    /* What shows through the gaps between balls: the shadowy depths of the pit. */
+    const depths = new THREE.Mesh(new THREE.CircleGeometry(PIT_R + 0.2, 64),
+      new THREE.MeshLambertMaterial({ color: '#2b3f7a' }));
+    depths.rotation.x = -Math.PI / 2;
+    depths.position.y = PILE_Y - R * 1.3;
+    group.add(depths);
+
+    /* Padded rim: a ring of soft cushions in alternating colours. */
+    const SEGS = 16, rimColors = ['#2a6fdb', '#e8322f', '#ffd21f', '#2fb84a'];
+    const cushion = new THREE.TorusGeometry(PIT_R + 0.45, 0.55, 14, 10, Math.PI * 2 / SEGS * 0.97);
+    for (let i = 0; i < SEGS; i++) {
+      const m = new THREE.Mesh(cushion, new THREE.MeshLambertMaterial({ color: rimColors[i % 4] }));
+      m.rotation.set(-Math.PI / 2, 0, i / SEGS * Math.PI * 2);
+      m.position.y = PILE_Y + 0.12;
+      m.castShadow = true; m.receiveShadow = true;
+      group.add(m);
+    }
+    /* The tub wall below the cushions. */
+    const wall = new THREE.Mesh(new THREE.CylinderGeometry(PIT_R + 0.7, PIT_R + 0.2, 1.6, 64, 1, true),
+      new THREE.MeshLambertMaterial({ color: '#f4f6ff', side: THREE.DoubleSide }));
+    wall.position.y = PILE_Y - 0.75;
+    group.add(wall);
+
+    /* The cloud it floats on. */
+    const puffs = [];
+    for (let i = 0; i < 46; i++) {
+      const a = rnd() * Math.PI * 2, d = Math.sqrt(rnd()) * PIT_R * 1.05;
+      const r = 2.6 + rnd() * 2.6 - d * 0.08;
+      puffs.push([Math.cos(a) * d, PILE_Y - 2.2 - rnd() * 2.2 - (PIT_R - d) * 0.18, Math.sin(a) * d, r]);
+    }
+    const cloud = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 18, 12),
+      new THREE.MeshLambertMaterial({ color: '#ffffff', emissive: '#bcd2ec', emissiveIntensity: 0.5 }),
+      puffs.length);
+    puffs.forEach((p, i) => {
+      dummy.position.set(p[0], p[1], p[2]);
+      dummy.scale.set(p[3], p[3] * 0.7, p[3]);
+      dummy.updateMatrix();
+      cloud.setMatrixAt(i, dummy.matrix);
+    });
+    group.add(cloud);
+
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- bouncing balls ------------------------------------------------
+   Each ball bounces forever on its own floor: thrown up, slowed by gravity,
+   falling back, squashing flat for a moment on landing and stretching as it
+   leaves. `floor` is the pile for the balls in the pit; out in the sky it is
+   an invisible one, at whatever height the ball happens to live.            */
+AFRAME.registerComponent('bouncers', {
+  schema: {
+    count:   {default: 300},
+    inPit:   {default: true},      /* bounce off the pile, or off thin air */
+    minR:    {default: 0.22},
+    maxR:    {default: 0.22},
+    minH:    {default: 0.6},       /* bounce heights, metres */
+    maxH:    {default: 8},
+    gravity: {default: 7},         /* a touch floatier than real */
+    near:    {default: 18},        /* sky balls: distance band from the pit */
+    far:     {default: 120},
+    seed:    {default: 1},
+    shadows: {default: false}
+  },
+  init: function () {
+    const d = this.data, rnd = mulberry32(d.seed * 911 + 17);
+    const segs = d.maxR > 0.5 ? 20 : 14;
+    const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, segs, Math.round(segs * 0.7)),
+      ballMaterial(), d.count);
+    mesh.frustumCulled = false;
+    mesh.castShadow = d.shadows;
+    const col = new THREE.Color();
+    this.balls = [];
+    for (let i = 0; i < d.count; i++) {
+      let x, z, floor;
+      if (d.inPit) {
+        /* Anywhere in the pit, except right where you arrive. */
+        do {
+          const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * (PIT_R - 0.6);
+          x = Math.cos(a) * r; z = Math.sin(a) * r;
+        } while (Math.hypot(x, z - 7) < 1.8);
+        floor = PILE_Y;
+      } else {
+        const a = rnd() * Math.PI * 2, r = d.near + Math.pow(rnd(), 0.7) * (d.far - d.near);
+        x = Math.cos(a) * r; z = Math.sin(a) * r;
+        floor = -45 + rnd() * 80;
+      }
+      /* Skew towards small hops, with the odd ball flying high. */
+      const h = d.minH + Math.pow(rnd(), 1.8) * (d.maxH - d.minH);
+      const v0 = Math.sqrt(2 * d.gravity * h);
+      this.balls.push({
+        x: x, z: z, floor: floor, r: d.minR + rnd() * (d.maxR - d.minR),
+        v0: v0, period: 2 * v0 / d.gravity, offset: rnd() * 10,
+        driftA: rnd() * Math.PI * 2, drift: d.inPit ? 0 : 0.4 + rnd() * 1.6
+      });
+      mesh.setColorAt(i, pickColor(rnd, col));
+    }
+    this.dummy = new THREE.Object3D();
+    this.mesh = mesh;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) {
+    if (!this.mesh) { return; }
+    const time = t / 1000, g = this.data.gravity, dummy = this.dummy;
+    for (let i = 0; i < this.balls.length; i++) {
+      const b = this.balls[i];
+      const tau = (time + b.offset) % b.period;
+      const y = b.v0 * tau - 0.5 * g * tau * tau;
+      /* Squash on contact, stretch with speed in the air. */
+      const contact = Math.min(tau, b.period - tau);
+      const squash = 0.32 * Math.exp(-contact * 16);
+      const speed = Math.abs(b.v0 - g * tau) / (b.v0 + 1e-3);
+      const sy = (1 - squash) * (1 + 0.1 * speed * (1 - squash * 3));
+      const sxz = 1 / Math.sqrt(sy);
+      /* Sky balls wander slowly while they bounce. */
+      const w = time * 0.05 + b.offset;
+      dummy.position.set(
+        b.x + Math.cos(b.driftA + w) * b.drift,
+        b.floor + y + b.r * sy,
+        b.z + Math.sin(b.driftA + w) * b.drift);
+      dummy.scale.set(b.r * sxz, b.r * sy, b.r * sxz);
+      dummy.updateMatrix();
+      this.mesh.setMatrixAt(i, dummy.matrix);
+    }
+    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+});
+
+/* ---------- keep the walker in the pit, wading among the balls ---------- */
+AFRAME.registerComponent('pit-walk', {
+  schema: { height: { default: 1.5 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    const d = Math.hypot(p.x, p.z);
+    if (d > WALK_R) { p.x *= WALK_R / d; p.z *= WALK_R / d; }
+    p.y = PILE_Y + this.data.height;
+  }
+});
+
+/* ---------- a round doorway ringed with balls: the way back ---------- */
+AFRAME.registerComponent('ball-ring', {
+  schema: { radius: {default: 1.75}, count: {default: 18}, ball: {default: 0.26}, seed: {default: 3} },
+  init: function () {
+    const d = this.data;
+    const mesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 16, 12), ballMaterial(), d.count);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    for (let i = 0; i < d.count; i++) {
+      const a = i / d.count * Math.PI * 2;
+      dummy.position.set(Math.cos(a) * d.radius, Math.sin(a) * d.radius, 0);
+      dummy.scale.setScalar(d.ball);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      mesh.setColorAt(i, col.set(BALL_COLORS[i % BALL_COLORS.length]));
+    }
+    mesh.castShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Ball Pit Sky</b><br>WASD / arrows to wade &middot; drag to look &middot; mind the bouncing balls</div>
+
+<a-scene fog="type: exponential; color: #bfe3ff; density: 0.0075"
+         shadow="type: pcfsoft"
+         renderer="colorManagement: true; antialias: true"
+         ambience="src: sounds/soumages-boing-bounce-sound-effect-427577.mp3; volume: 0.5">
+
+  <a-entity blue-sky></a-entity>
+  <a-entity puff-clouds></a-entity>
+
+  <a-entity light="type: hemisphere; color: #dff0ff; groundColor: #ffe6c8; intensity: 0.85"></a-entity>
+  <a-entity position="22 30 -32"
+    light="type: directional; color: #fff4e0; intensity: 1.15; castShadow: true;
+           shadowMapWidth: 2048; shadowMapHeight: 2048;
+           shadowCameraLeft: -16; shadowCameraRight: 16;
+           shadowCameraTop: 16; shadowCameraBottom: -16;
+           shadowCameraFar: 90; shadowBias: -0.0008"></a-entity>
+
+  <a-entity ball-pit></a-entity>
+
+  <!-- Balls hopping out of the pile around you, and bigger ones bouncing all
+       across the sky, above the pit and far below it. -->
+  <a-entity bouncers="count: 320; inPit: true; minH: 0.4; maxH: 9; shadows: true; seed: 1"></a-entity>
+  <a-entity bouncers="count: 900; inPit: false; minR: 0.35; maxR: 1.6; minH: 2; maxH: 16;
+                      near: 17; far: 130; seed: 2"></a-entity>
+
+  <a-entity id="rig" position="0 1.5 7" pit-walk
+            wasd-controls="acceleration: 40" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="600" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Way back to the jungle: turn around from the starting spot. -->
+  <a-entity position="0 0 10.6" rotation="0 180 0">
+    <a-entity position="0 2.1 0" ball-ring></a-entity>
+    <a-circle class="portal" position="0 2.1 0" radius="1.5"
+              material="shader: flat; side: double"
+              portal="href: jungle.html; color: #8fd3ff; hover: #e2f5ff"></a-circle>
+    <a-text value="Back to the jungle" align="center" width="4" color="#ffffff"
+            position="0 4.3 0.1"></a-text>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

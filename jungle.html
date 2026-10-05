@@ -55,6 +55,9 @@ const WATER_Y = -1.15;
    thicket, so you never reach the edge of the world behind it. */
 const WALL_R = 29;
 const WALK_R = 26;
+/* A round doorway among the trees, off to the left of the lagoon: the way
+   through to the Ball Pit Sky. */
+const BALLPIT_DOOR = { x: -14, z: -3 };
 
 function lagoonMask(x, z) {
   const d = Math.hypot(x - LAGOON.x, z - LAGOON.z);
@@ -439,41 +442,170 @@ AFRAME.registerComponent('flock', {
 });
 
 /* ---------- fish under the lagoon surface ---------- */
-AFRAME.registerComponent('fish-school', {
-  schema: { count: {default: 15} },
-  init: function () {
-    const rnd = mulberry32(661);
-    const geo = new THREE.SphereGeometry(1, 8, 6);
-    geo.scale(0.35, 0.22, 0.75);
-    const mesh = new THREE.InstancedMesh(geo,
-      new THREE.MeshLambertMaterial({ color: '#d8b463', emissive: '#4a3a12',
-        emissiveIntensity: 0.6 }), this.data.count);
-    mesh.frustumCulled = false;
-    this.fish = [];
-    for (let i = 0; i < this.data.count; i++) {
-      this.fish.push({
-        r: 1.4 + rnd() * (LAGOON.r - 3), phase: rnd() * Math.PI * 2,
-        speed: (0.25 + rnd() * 0.4) * (rnd() < 0.5 ? -1 : 1),
-        depth: 0.3 + rnd() * 0.75, size: 0.5 + rnd() * 0.6, wob: rnd() * 4
-      });
+/* One fish, nose along +z, about a metre long: a body laterally flattened like
+   a real fish, a forked tail, fins and eyes. Vertex colours carry the shading
+   (dark back, pale belly, darker fins); each instance's colour tints it. */
+function fishGeometry() {
+  const pos = [], nrm = [], col = [];
+  function tri(a, b, c, shade) {
+    const ab = new THREE.Vector3().subVectors(b, a), ac = new THREE.Vector3().subVectors(c, a);
+    const n = ab.cross(ac).normalize();
+    for (const v of [a, b, c]) { pos.push(v.x, v.y, v.z); nrm.push(n.x, n.y, n.z); col.push(shade, shade, shade); }
+  }
+  const V = (x, y, z) => new THREE.Vector3(x, y, z);
+
+  /* Body: rings from the tail stalk (u=0) to the nose (u=1), deepest a little
+     ahead of the middle, as on a perch or a tilapia. */
+  const RINGS = 16, SIDES = 12, Z0 = -0.3, LEN = 0.8;
+  const girth = u => Math.sin(Math.PI * Math.pow(u, 1.3));
+  const halfH = u => 0.03 + 0.17 * girth(u), halfW = u => 0.015 + 0.075 * girth(u);
+  const ring = [];
+  for (let i = 0; i <= RINGS; i++) {
+    const u = i / RINGS, row = [];
+    for (let j = 0; j < SIDES; j++) {
+      const a = j / SIDES * Math.PI * 2;
+      row.push(V(Math.cos(a) * halfW(u), Math.sin(a) * halfH(u) - 0.012 * girth(u), Z0 + u * LEN));
     }
+    ring.push(row);
+  }
+  const body = new THREE.BufferGeometry(), bp = [], bc = [], bi = [];
+  for (const row of ring) for (const v of row) {
+    bp.push(v.x, v.y, v.z);
+    /* Countershading: dark along the back, pale underneath. */
+    const up = THREE.MathUtils.clamp(v.y / 0.1, -1, 1);
+    const shade = 0.78 - 0.4 * Math.max(0, up) + 0.22 * Math.max(0, -up);
+    bc.push(shade, shade, shade);
+  }
+  for (let i = 0; i < RINGS; i++) for (let j = 0; j < SIDES; j++) {
+    const a = i * SIDES + j, b = i * SIDES + (j + 1) % SIDES, c = a + SIDES, d = b + SIDES;
+    bi.push(a, b, d, a, d, c);
+  }
+  body.setAttribute('position', new THREE.Float32BufferAttribute(bp, 3));
+  body.setAttribute('color', new THREE.Float32BufferAttribute(bc, 3));
+  body.setIndex(bi);
+  body.computeVertexNormals();
+  const flat = body.toNonIndexed();
+  pos.push(...flat.attributes.position.array);
+  nrm.push(...flat.attributes.normal.array);
+  col.push(...flat.attributes.color.array);
+  /* Cap the blunt nose. */
+  const nose = ring[RINGS], tip = V(0, -0.005, Z0 + LEN + 0.025);
+  for (let j = 0; j < SIDES; j++) tri(nose[j], nose[(j + 1) % SIDES], tip, 0.7);
+
+  /* Forked tail fin. */
+  const fin = 0.5;
+  tri(V(0, 0.035, -0.28), V(0, 0.19, -0.54), V(0, 0, -0.43), fin);
+  tri(V(0, 0.035, -0.28), V(0, 0, -0.43), V(0, -0.035, -0.28), fin);
+  tri(V(0, -0.035, -0.28), V(0, 0, -0.43), V(0, -0.19, -0.54), fin);
+  /* Dorsal fin along the back. */
+  tri(V(0, 0.17, 0.22), V(0, 0.29, 0.06), V(0, 0.2, 0.0), 0.42);
+  tri(V(0, 0.2, 0.0), V(0, 0.29, 0.06), V(0, 0.22, -0.13), 0.42);
+  tri(V(0, 0.2, 0.0), V(0, 0.22, -0.13), V(0, 0.1, -0.15), 0.42);
+  /* Anal fin underneath, ahead of the tail. */
+  tri(V(0, -0.11, -0.02), V(0, -0.19, -0.14), V(0, -0.06, -0.2), 0.6);
+  /* Pectoral fins, swept back behind the gills. */
+  for (const s of [-1, 1]) {
+    tri(V(s * 0.06, -0.03, 0.3), V(s * 0.17, -0.1, 0.16), V(s * 0.065, -0.07, 0.22), 0.62);
+  }
+  /* Eyes. */
+  const eye = new THREE.SphereGeometry(0.024, 8, 6).toNonIndexed();
+  for (const s of [-1, 1]) {
+    const e = eye.clone(); e.translate(s * 0.052, 0.035, 0.37);
+    pos.push(...e.attributes.position.array);
+    nrm.push(...e.attributes.normal.array);
+    for (let k = 0; k < e.attributes.position.count; k++) col.push(0.04, 0.04, 0.05);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  return geo;
+}
+
+/* Gold, orange, silver-blue and red, like the fish in a tropical pool. */
+const FISH_COLORS = ['#f0c060', '#f08a3c', '#b8cad8', '#e2583a', '#f6d88a', '#9fc4b0'];
+
+AFRAME.registerComponent('fish-school', {
+  schema: { schools: {default: 6}, perSchool: {default: 3} },
+  init: function () {
+    const rnd = mulberry32(661), d = this.data, count = d.schools * d.perSchool;
+    const geo = fishGeometry();
+    /* Per fish: where it is in its tail beat, and how fast it beats. */
+    const swim = new Float32Array(count * 2);
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide,
+      emissive: '#3a3018', emissiveIntensity: 0.7 });
+    /* The swimming wave: a sideways S-curve running from head to tail,
+       barely moving the head and swinging the tail fin the most. */
+    mat.onBeforeCompile = shader => {
+      shader.uniforms.uTime = { value: 0 };
+      shader.vertexShader = 'uniform float uTime;\nattribute vec2 aSwim;\n' +
+        shader.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         float back = clamp((0.3 - position.z) / 0.84, 0.0, 1.0);
+         transformed.x += sin(uTime * aSwim.y + aSwim.x + position.z * 7.0) *
+                          (0.012 + 0.12 * back * back);`);
+      this.shader = shader;
+    };
+    mat.customProgramCacheKey = () => 'fish-swim';
+    const mesh = new THREE.InstancedMesh(geo, mat, count);
+    mesh.frustumCulled = false;
+
+    this.fish = [];
+    const col = new THREE.Color();
+    for (let s = 0; s < d.schools; s++) {
+      /* Each school shares a path; its members trail one another along it. */
+      const path = {
+        r: 2.2 + rnd() * (LAGOON.r - 4.6), phase: rnd() * Math.PI * 2,
+        speed: (0.18 + rnd() * 0.22) * (rnd() < 0.5 ? -1 : 1),
+        depth: 0.22 + rnd() * 0.28, wob: rnd() * 10,
+        tint: FISH_COLORS[Math.floor(rnd() * FISH_COLORS.length)]
+      };
+      for (let m = 0; m < d.perSchool; m++) {
+        const i = this.fish.length;
+        this.fish.push({
+          path: path, lag: m * (0.16 + rnd() * 0.08) * Math.sign(path.speed),
+          dr: (rnd() - 0.5) * 0.9, dy: (rnd() - 0.5) * 0.25,
+          size: 0.5 + rnd() * 0.35, wob: rnd() * 10
+        });
+        swim[i * 2] = rnd() * Math.PI * 2;
+        swim[i * 2 + 1] = 7 + Math.abs(path.speed) * 10 + rnd() * 2;
+        col.set(rnd() < 0.8 ? path.tint : FISH_COLORS[Math.floor(rnd() * FISH_COLORS.length)]);
+        mesh.setColorAt(i, col);
+      }
+    }
+    geo.setAttribute('aSwim', new THREE.InstancedBufferAttribute(swim, 2));
+
     this.dummy = new THREE.Object3D();
+    this.dummy.rotation.order = 'YXZ';
+    this.here = new THREE.Vector3(); this.ahead = new THREE.Vector3();
     this.mesh = mesh;
     this.el.setObject3D('mesh', mesh);
   },
+  /* Where a fish is at time t: round the lagoon on a path that wanders in and
+     out, speeding up and easing off rather than gliding at a constant rate. */
+  at: function (f, t, out) {
+    const p = f.path;
+    const a = p.phase + p.speed * (t + 2.2 * Math.sin(t * 0.37 + p.wob)) - f.lag;
+    const r = p.r + f.dr + Math.sin(t * 0.21 + p.wob) * 0.9 + Math.sin(a * 3 + p.wob) * 0.35;
+    const x = LAGOON.x + Math.cos(a) * r, z = LAGOON.z + Math.sin(a) * r;
+    let y = WATER_Y - p.depth + f.dy + Math.sin(t * 0.6 + f.wob) * 0.1;
+    /* Stay under the surface and clear of the bottom near the shallow edge. */
+    y = Math.min(WATER_Y - 0.14 * f.size - 0.08, Math.max(y, terrainH(x, z) + 0.14 * f.size + 0.06));
+    return out.set(x, y, z);
+  },
   tick: function (t) {
     if (!this.mesh) { return; }
-    const time = t / 1000, dummy = this.dummy;
+    const time = t / 1000, dummy = this.dummy, here = this.here, ahead = this.ahead;
+    if (this.shader) this.shader.uniforms.uTime.value = time;
     for (let i = 0; i < this.fish.length; i++) {
       const f = this.fish[i];
-      const a = f.phase + time * f.speed;
-      dummy.position.set(
-        LAGOON.x + Math.cos(a) * f.r,
-        WATER_Y - f.depth + Math.sin(time * 0.8 + f.wob) * 0.12,
-        LAGOON.z + Math.sin(a) * f.r);
-      /* Face along the swim, with a tail-flick wobble. */
-      dummy.rotation.set(0, -a + (f.speed > 0 ? 0 : Math.PI),
-        Math.sin(time * 5 + f.wob) * 0.18);
+      this.at(f, time, here);
+      this.at(f, time + 0.08, ahead);
+      const dx = ahead.x - here.x, dy = ahead.y - here.y, dz = ahead.z - here.z;
+      /* Face along the swim, tipping the nose up or down with the depth. */
+      dummy.position.copy(here);
+      dummy.rotation.set(-Math.atan2(dy, Math.hypot(dx, dz) + 1e-4) * 0.8, Math.atan2(dx, dz), 0);
       dummy.scale.setScalar(f.size);
       dummy.updateMatrix();
       this.mesh.setMatrixAt(i, dummy.matrix);
@@ -611,6 +743,14 @@ AFRAME.registerComponent('jungle-walk', {
   }
 });
 
+/* ---------- stand an entity on the ground wherever it is ---------- */
+AFRAME.registerComponent('on-ground', {
+  init: function () {
+    const p = this.el.object3D.position;
+    p.y = terrainH(p.x, p.z);
+  }
+});
+
 /* ---------- scatter the forest ---------- */
 AFRAME.registerComponent('populate', {
   init: function () {
@@ -625,6 +765,7 @@ AFRAME.registerComponent('populate', {
       /* Keep the arrival spot and the way back clear. */
       if (Math.hypot(x, z - 8) < 5) continue;
       if (Math.hypot(x, z - 12) < 4) continue;
+      if (Math.hypot(x - BALLPIT_DOOR.x, z - BALLPIT_DOOR.z) < 4.5) continue;
       spots.push({ x: x, z: z, seed: i * 7 + 2,
                    h: 10 + rnd() * 11, r: 0.34 + rnd() * 0.32,
                    hue: 96 + rnd() * 34, canopy: 0.85 + rnd() * 0.6 });
@@ -691,6 +832,63 @@ AFRAME.registerComponent('populate', {
     <a-camera far="600" wasd-controls="enabled: false" look-controls="enabled: false">
       <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
     </a-camera>
+  </a-entity>
+
+  <!-- Through to the Ball Pit Sky: a round doorway ringed with ball-pit balls,
+       half swallowed by the jungle, turned to face where you arrive. -->
+  <a-entity position="-14 0 -3" rotation="0 52 0" on-ground>
+    <a-circle class="portal" radius="1.5" position="0 2.1 0.12"
+              material="shader: flat"
+              portal="href: ballpit.html; color: #8fd3ff; hover: #e2f5ff"></a-circle>
+    <a-sphere position="1.75 2.10 0.1" radius="0.26"
+              material="color: #e8322f; roughness: 0.3"></a-sphere>
+    <a-sphere position="1.64 2.70 0.1" radius="0.26"
+              material="color: #ffd21f; roughness: 0.3"></a-sphere>
+    <a-sphere position="1.34 3.22 0.1" radius="0.26"
+              material="color: #2a6fdb; roughness: 0.3"></a-sphere>
+    <a-sphere position="0.88 3.62 0.1" radius="0.26"
+              material="color: #2fb84a; roughness: 0.3"></a-sphere>
+    <a-sphere position="0.30 3.82 0.1" radius="0.26"
+              material="color: #ff8a1f; roughness: 0.3"></a-sphere>
+    <a-sphere position="-0.30 3.82 0.1" radius="0.26"
+              material="color: #8e44c9; roughness: 0.3"></a-sphere>
+    <a-sphere position="-0.87 3.62 0.1" radius="0.26"
+              material="color: #ff5fa8; roughness: 0.3"></a-sphere>
+    <a-sphere position="-1.34 3.22 0.1" radius="0.26"
+              material="color: #1fc4d6; roughness: 0.3"></a-sphere>
+    <a-sphere position="-1.64 2.70 0.1" radius="0.26"
+              material="color: #e8322f; roughness: 0.3"></a-sphere>
+    <a-sphere position="-1.75 2.10 0.1" radius="0.26"
+              material="color: #ffd21f; roughness: 0.3"></a-sphere>
+    <a-sphere position="-1.64 1.50 0.1" radius="0.26"
+              material="color: #2a6fdb; roughness: 0.3"></a-sphere>
+    <a-sphere position="-1.34 0.98 0.1" radius="0.26"
+              material="color: #2fb84a; roughness: 0.3"></a-sphere>
+    <a-sphere position="-0.88 0.58 0.1" radius="0.26"
+              material="color: #ff8a1f; roughness: 0.3"></a-sphere>
+    <a-sphere position="-0.30 0.38 0.1" radius="0.26"
+              material="color: #8e44c9; roughness: 0.3"></a-sphere>
+    <a-sphere position="0.30 0.38 0.1" radius="0.26"
+              material="color: #ff5fa8; roughness: 0.3"></a-sphere>
+    <a-sphere position="0.88 0.58 0.1" radius="0.26"
+              material="color: #1fc4d6; roughness: 0.3"></a-sphere>
+    <a-sphere position="1.34 0.98 0.1" radius="0.26"
+              material="color: #e8322f; roughness: 0.3"></a-sphere>
+    <a-sphere position="1.64 1.50 0.1" radius="0.26"
+              material="color: #ffd21f; roughness: 0.3"></a-sphere>
+    <!-- Vines and leaves creeping over the ring. -->
+    <a-sphere position="-1.45 3.2 0.1" radius="0.5" scale="1 0.6 0.8"
+              material="color: #3f7a3a; roughness: 1"></a-sphere>
+    <a-sphere position="0.95 3.6 0.08" radius="0.42" scale="1.1 0.6 0.8"
+              material="color: #4b8c42; roughness: 1"></a-sphere>
+    <a-sphere position="1.75 1.0 0.1" radius="0.36" scale="0.8 1.4 0.8"
+              material="color: #3f7a3a; roughness: 1"></a-sphere>
+    <a-cylinder position="-0.7 3.05 0.3" radius="0.024" height="1.3"
+                material="color: #4a6b33"></a-cylinder>
+    <a-cylinder position="0.55 3.2 0.3" radius="0.02" height="0.9"
+                material="color: #4a6b33"></a-cylinder>
+    <a-entity position="0 2.2 1.6"
+              light="type: point; color: #8fd3ff; intensity: 1.4; distance: 9"></a-entity>
   </a-entity>
 
   <!-- Way back to the hub room: turn around from the starting spot. -->

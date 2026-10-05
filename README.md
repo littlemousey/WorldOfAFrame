@@ -20,6 +20,10 @@ browser, mouse and keyboard, or in a headset via the VR button.
 | **Japanese Garden** | Rolling hills, cherry trees and drifting blossom. |
 | **Crystal Cave** | A dark chamber lit only by the crystals growing in it, around a still black pool. |
 
+There is a fifth world that is not in the hub: look around the jungle for a round
+doorway ringed with ball-pit balls. It leads to **Ball Pit Sky** — a ball pit
+floating on a cloud in a blue sky, with balls of every colour bouncing all around it.
+
 Each doorway is its own piece of architecture — a pointed ice arch, an overgrown
 wooden one, a torii, a hole broken through rock — and none of them are labelled.
 The choice is meant to be made on the doorway itself.
@@ -47,6 +51,7 @@ download tiny and means the scenes have no art dependencies.
 index.html              the hub — the room in space with the four doorways
 snow.html   jungle.html
 cave.html   japanese-garden.html
+ballpit.html            reached through a door in jungle.html, not from the hub
 christmas.html          the original scene, kept but no longer linked from the hub
 
 js/portal.js            makes an entity a clickable door to another page
@@ -68,5 +73,7 @@ Ambient sound from [Pixabay](https://pixabay.com/), with thanks to the artists:
 - **Universfield** — *Silent Universe* (`351473`) — the hub
 - **Soul_Serenity_Sounds** — *Jungle Nature* (`229896`) — Jungle Hollow
 - **mightuser** — *Sound of Howling Wind Through a Mountain Pass* (`261324`) — Snow Peaks
+- **Soumages** — *Boing Bounce Sound Effect* (`427577`) — Ball Pit Sky
+- **Yuliana Yurukova** — *Bird Chirps* (`343624`) — Japanese Garden
 
 Built with [A-Frame](https://aframe.io/) by Mozilla and the A-Frame community.

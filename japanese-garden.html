@@ -5,6 +5,7 @@
 <title>Ghibli Valley</title>
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
 <script src="js/portal.js"></script>
+<script src="js/ambience.js"></script>
 <style>
   body { margin: 0; font-family: system-ui, sans-serif; }
   #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
@@ -44,10 +45,37 @@ function fbm(x, y) {
   return s;
 }
 /* Flat near origin so walking feels stable, rolling hills further out. */
-function terrainH(x, z) {
+function hillsH(x, z) {
   const d = Math.sqrt(x * x + z * z);
   const ramp = THREE.MathUtils.smoothstep(d, 10, 42);
   return ((fbm(x * 0.018, z * 0.018) - 0.5) * 26 + (fbm(x * 0.07, z * 0.07) - 0.5) * 3.5) * ramp;
+}
+
+/* ---------- koi pond outline ---------- */
+/* A kidney-shaped outline shared by the terrain cut-out, the basin, grass, shrubs and walking. */
+const POND = { x: 14, z: -16, r: 4.8 };
+function pondRadius(a) {
+  return POND.r * (1 + 0.2 * Math.sin(2 * a + 0.6) + 0.08 * Math.sin(3 * a + 2.1));
+}
+/* Roughly how far (x, z) lies outside the pond edge; negative inside. */
+function pondEdge(x, z) {
+  const dx = x - POND.x, dz = z - POND.z;
+  return Math.sqrt(dx * dx + dz * dz) - pondRadius(Math.atan2(dz, dx));
+}
+const POND_GLSL = `
+float pondEdge(vec2 p) {
+  vec2 d = p - vec2(${POND.x.toFixed(2)}, ${POND.z.toFixed(2)});
+  float a = atan(d.y, d.x);
+  return length(d) - ${POND.r.toFixed(2)} * (1.0 + 0.2 * sin(2.0 * a + 0.6) + 0.08 * sin(3.0 * a + 2.1));
+}`;
+/* The pond and the torii both sit on slopes, so level a terrace around each. */
+const POND_GROUND = hillsH(POND.x, POND.z);
+const TORII = { x: 0, z: -34 };
+const TORII_GROUND = hillsH(TORII.x, TORII.z);
+function terrainH(x, z) {
+  const S = THREE.MathUtils.smoothstep, L = THREE.MathUtils.lerp;
+  const h = L(hillsH(x, z), POND_GROUND, 1 - S(pondEdge(x, z), 2, 9));
+  return L(h, TORII_GROUND, 1 - S(Math.hypot(x - TORII.x, z - TORII.z), 4, 11));
 }
 
 /* ---------- runtime canvas textures ---------- */
@@ -66,12 +94,41 @@ function blossomTexture(hueShift) {
   }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
+/* White so each petal instance can carry its own colour. */
 function petalTexture() {
   const S = 64, c = document.createElement('canvas');
   c.width = c.height = S;
   const g = c.getContext('2d');
-  g.fillStyle = '#ffd6e2';
+  g.fillStyle = '#ffffff';
   g.beginPath(); g.ellipse(S / 2, S / 2, S * 0.42, S * 0.26, 0, 0, Math.PI * 2); g.fill();
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+/* A clump of leaves, optionally dotted with five-petal blooms. leaf/flower are [h, s, l]. */
+function shrubTexture(seed, leaf, flower, flowers) {
+  const S = 128, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d'), rnd = mulberry32(seed);
+  const hsl = (h, s, l) => 'hsl(' + h + ',' + s + '%,' + l + '%)';
+  for (let i = 0; i < 90; i++) {
+    const a = rnd() * Math.PI * 2, r = Math.pow(rnd(), 0.6) * S * 0.4;
+    g.fillStyle = hsl(leaf[0] + (rnd() - 0.5) * 12, leaf[1], leaf[2] + (rnd() - 0.5) * 16);
+    g.beginPath();
+    g.ellipse(S / 2 + Math.cos(a) * r, S / 2 + Math.sin(a) * r, 6 + rnd() * 5, 3 + rnd() * 2.5,
+      rnd() * Math.PI, 0, Math.PI * 2);
+    g.fill();
+  }
+  for (let i = 0; i < flowers; i++) {
+    const a = rnd() * Math.PI * 2, r = Math.pow(rnd(), 0.5) * S * 0.37;
+    const px = S / 2 + Math.cos(a) * r, py = S / 2 + Math.sin(a) * r;
+    const rad = 4 + rnd() * 4, spin = rnd() * Math.PI;
+    g.fillStyle = hsl(flower[0] + (rnd() - 0.5) * 12, flower[1], flower[2] + (rnd() - 0.5) * 12);
+    for (let k = 0; k < 5; k++) {
+      const pa = spin + k / 5 * Math.PI * 2;
+      g.beginPath(); g.arc(px + Math.cos(pa) * rad * 0.55, py + Math.sin(pa) * rad * 0.55, rad * 0.5, 0, Math.PI * 2); g.fill();
+    }
+    g.fillStyle = hsl(48, 90, 72);
+    g.beginPath(); g.arc(px, py, rad * 0.22, 0, Math.PI * 2); g.fill();
+  }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
 }
 
@@ -151,7 +208,16 @@ AFRAME.registerComponent('terrain', {
     }
     geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geo.computeVertexNormals();
-    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    const mat = new THREE.MeshLambertMaterial({ vertexColors: true });
+    /* Cut the pond out of the ground so the basin below shows through. */
+    mat.onBeforeCompile = function (shader) {
+      shader.vertexShader = 'varying vec2 vWorldXZ;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n vWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
+      shader.fragmentShader = 'varying vec2 vWorldXZ;\n' + POND_GLSL + '\n' + shader.fragmentShader
+        .replace('void main() {', 'void main() {\n if (pondEdge(vWorldXZ) < 0.0) discard;');
+    };
+    mat.customProgramCacheKey = function () { return 'terrain-pond'; };
+    const mesh = new THREE.Mesh(geo, mat);
     mesh.receiveShadow = true;
     this.el.setObject3D('mesh', mesh);
   }
@@ -246,7 +312,7 @@ AFRAME.registerComponent('grass-field', {
     for (let i = 0; i < this.data.count; i++) {
       const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * this.data.radius;
       const x = Math.cos(a) * r, z = Math.sin(a) * r;
-      if (Math.sqrt((x - 14) * (x - 14) + (z + 16) * (z + 16)) < 6) continue;
+      if (pondEdge(x, z) < 0.5 || insideZen(x, z, 0.25)) continue;
       dummy.position.set(x, terrainH(x, z) - 0.05, z);
       dummy.rotation.set(0, rnd() * Math.PI, 0);
       dummy.scale.set(1, 0.55 + rnd() * 0.85, 1);
@@ -263,34 +329,54 @@ AFRAME.registerComponent('grass-field', {
 });
 
 /* ---------- drifting petals ---------- */
+/* [weight, h, s, l] in sRGB: mostly cherry pink, with some of the shrub colours mixed in. */
+const PETAL_COLORS = [
+  [0.50, 345, 80, 88], [0.20, 335, 75, 76], [0.10, 350, 60, 96],
+  [0.10, 352, 75, 56], [0.10, 285, 55, 74]
+];
 AFRAME.registerComponent('petal-storm', {
-  schema: { count: { default: 320 } },
+  schema: { count: { default: 3000 }, spread: { default: 72 } },
   init: function () {
-    const rnd = mulberry32(88);
-    this.mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.16, 0.11),
+    const rnd = mulberry32(88), d = this.data, col = new THREE.Color();
+    this.mesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.2, 0.14),
       new THREE.MeshLambertMaterial({ map: petalTexture(), alphaTest: 0.5, side: THREE.DoubleSide }),
-      this.data.count);
+      d.count);
     this.mesh.frustumCulled = false;
     this.state = [];
-    for (let i = 0; i < this.data.count; i++) this.state.push({
-      x: (rnd()-0.5)*70, y: rnd()*16, z: (rnd()-0.5)*70,
-      fall: 0.35 + rnd()*0.5, phase: rnd()*10, spin: 0.6 + rnd()*1.6, drift: 0.5 + rnd()*0.9 });
+    for (let i = 0; i < d.count; i++) {
+      this.state.push({
+        x: (rnd()-0.5)*d.spread, y: rnd()*26, z: (rnd()-0.5)*d.spread, size: 0.75 + rnd()*0.65,
+        fall: 0.35 + rnd()*0.5, phase: rnd()*10, spin: 0.6 + rnd()*1.6, drift: 0.5 + rnd()*0.9 });
+      let pick = rnd(), c = PETAL_COLORS[0];
+      for (const pc of PETAL_COLORS) { c = pc; if ((pick -= pc[0]) < 0) break; }
+      col.setHSL(c[1] / 360, c[2] / 100, c[3] / 100, THREE.SRGBColorSpace);
+      this.mesh.setColorAt(i, col);
+    }
     this.dummy = new THREE.Object3D();
+    this.center = new THREE.Vector3();
     this.el.setObject3D('mesh', this.mesh);
   },
   tick: function (t, dt) {
     if (!dt) return;
-    const s = dt / 1000, time = t / 1000;
+    const s = dt / 1000, time = t / 1000, spread = this.data.spread, half = spread / 2;
+    /* The petal volume follows the walker so the sky stays full wherever they go. */
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.center);
+    const cx = this.center.x, cz = this.center.z;
     for (let i = 0; i < this.state.length; i++) {
       const p = this.state[i];
       p.y -= p.fall * s;
       p.x += Math.sin(time * 0.7 + p.phase) * p.drift * s + 0.35 * s;
       p.z += Math.cos(time * 0.5 + p.phase) * p.drift * s;
+      if (p.x - cx > half) p.x -= spread; else if (p.x - cx < -half) p.x += spread;
+      if (p.z - cz > half) p.z -= spread; else if (p.z - cz < -half) p.z += spread;
       if (p.y < terrainH(p.x, p.z) - 0.5) {
-        p.y = 12 + Math.random()*7; p.x = (Math.random()-0.5)*70; p.z = (Math.random()-0.5)*70;
+        p.x = cx + (Math.random()-0.5)*spread; p.z = cz + (Math.random()-0.5)*spread;
+        p.y = terrainH(p.x, p.z) + 18 + Math.random()*10;
       }
       this.dummy.position.set(p.x, p.y, p.z);
       this.dummy.rotation.set(time*p.spin, time*p.spin*0.7 + p.phase, time*p.spin*0.4);
+      this.dummy.scale.setScalar(p.size);
       this.dummy.updateMatrix();
       this.mesh.setMatrixAt(i, this.dummy.matrix);
     }
@@ -329,34 +415,690 @@ AFRAME.registerComponent('clouds', {
   }
 });
 
+const TREE_SPOTS = [
+  { x:-11, z:-13, seed:3,  trunk:3.1, r:0.40, hue: 0, s:1.15 },
+  { x:  9, z:-22, seed:8,  trunk:2.7, r:0.33, hue: 8, s:1.00 },
+  { x:-24, z: -6, seed:15, trunk:2.3, r:0.28, hue:-6, s:0.90 },
+  { x: 22, z: -4, seed:21, trunk:2.9, r:0.36, hue: 4, s:1.05 },
+  { x: -6, z: 16, seed:27, trunk:2.5, r:0.30, hue:-3, s:0.95 },
+  { x: 30, z:-30, seed:34, trunk:3.3, r:0.42, hue: 6, s:1.20 },
+  { x:-34, z:-26, seed:41, trunk:3.0, r:0.38, hue:-8, s:1.10 }
+];
+
+/* ---------- garden layout: zen garden, rock groupings, stone lanterns ---------- */
+/* Karesansui: a raked gravel bed with moss islands. u/v are metres in the bed's
+   own frame (u along its width); each island's stones are [du, dv, halfWidth, height]. */
+const ZEN = { x: -10, z: 1.5, w: 7, d: 4.6, rot: 0.3, islands: [
+  { u: -1.9, v: -0.4, moss: 0.75, ring: 1.35,
+    stones: [[0, 0, 0.32, 0.95], [0.55, 0.3, 0.3, 0.4], [-0.45, 0.35, 0.22, 0.25]] },
+  { u: 1.0, v: 0.9, moss: 0.6, ring: 1.1, stones: [[0, 0, 0.36, 0.45], [0.4, -0.25, 0.22, 0.22]] },
+  { u: 2.5, v: -1.0, moss: 0.4, ring: 0.75, stones: [[0, 0, 0.25, 0.3]] }
+] };
+function zenWorld(u, v) {
+  const c = Math.cos(ZEN.rot), s = Math.sin(ZEN.rot);
+  return { x: ZEN.x + u * c + v * s, z: ZEN.z - u * s + v * c };
+}
+function insideZen(x, z, margin) {
+  const c = Math.cos(ZEN.rot), s = Math.sin(ZEN.rot), dx = x - ZEN.x, dz = z - ZEN.z;
+  return Math.abs(dx * c - dz * s) < ZEN.w / 2 + margin && Math.abs(dx * s + dz * c) < ZEN.d / 2 + margin;
+}
+/* Rock groupings in odd numbers: one tall standing stone with lower stones around it. */
+const ROCK_GROUPS = [
+  { x: -15, z: -4, n: 3 }, { x: 7, z: -7, n: 3 }, { x: 19, z: -25, n: 5 }, { x: -18, z: -20, n: 3 },
+  { x: 27, z: -17, n: 3 }, { x: -28, z: 6, n: 3 }, { x: 12, z: 5, n: 3 }, { x: -7, z: -24, n: 5 },
+  { x: 34, z: -6, n: 3 }, { x: 9, z: -37, n: 3 }, { x: -19, z: 13, n: 3 }, { x: 5, z: 15, n: 3 }
+];
+const pondSpot = (a, inset) => ({ x: POND.x + Math.cos(a) * (pondRadius(a) - inset),
+                                  z: POND.z + Math.sin(a) * (pondRadius(a) - inset) });
+/* kasuga = tall pillar lantern, yukimi = low legged snow-viewing lantern, oki = small placed lantern. */
+const LANTERNS = [
+  { type: 'kasuga', x: -5, z: -7, rot: 20, moss: 0.4, light: true },
+  { type: 'kasuga', x: -3.3, z: -18, rot: 0, moss: 0.35 },
+  { type: 'kasuga', x: 3.3, z: -18, rot: 0, moss: 0.35 },
+  { type: 'kasuga', x: -3.6, z: -29.5, rot: 0, moss: 0.35 },
+  { type: 'kasuga', x: 3.6, z: -29.5, rot: 0, moss: 0.35 },
+  { type: 'yukimi', ...pondSpot(3.4, 0.1), rot: 15, moss: 0.6, water: true },
+  { type: 'oki', ...zenWorld(0.6, 1.1), rot: 10, moss: 0.5, lift: 0.08 },
+  { type: 'kasuga', x: 24, z: -11, rot: -30, moss: 0.7 },
+  { type: 'yukimi', x: -21, z: -11, rot: 40, moss: 0.7 }
+];
+
+/* ---------- flowering shrubs ---------- */
+/* Azaleas in red / pink / purple, plus red-maple and purple smoke-bush foliage.
+   tall = height-to-radius ratio of the mound; weight = how often a cluster picks it. */
+const SHRUB_KINDS = [
+  { leaf: [112, 42, 32], flower: [356, 85, 52], flowers: 46, tall: 0.95, weight: 0.24 },
+  { leaf: [108, 40, 34], flower: [330, 85, 74], flowers: 50, tall: 0.95, weight: 0.24 },
+  { leaf: [112, 38, 32], flower: [282, 62, 66], flowers: 46, tall: 1.00, weight: 0.20 },
+  { leaf: [358, 78, 48], flower: null,          flowers: 0,  tall: 1.45, weight: 0.17 },
+  { leaf: [305, 45, 42], flower: null,          flowers: 0,  tall: 1.20, weight: 0.15 }
+];
+AFRAME.registerComponent('shrubs', {
+  schema: { clusters: { default: 48 } },
+  init: function () {
+    const rnd = mulberry32(5150), bushes = [];
+    /* Keep the pond, lanterns, rocks, zen garden, torii, return portal and the walk to the torii clear. */
+    const blockers = [{ x: 0, z: -34, r: 6 }, { x: 0, z: 10, r: 3.5 }]
+      .concat(TREE_SPOTS.map(t => ({ x: t.x, z: t.z, r: 1.6 })))
+      .concat(LANTERNS.map(l => ({ x: l.x, z: l.z, r: 0.9 })))
+      .concat(ROCK_GROUPS.map(g => ({ x: g.x, z: g.z, r: 2.4 })));
+    function fits(x, z, r, pondGap) {
+      if (Math.abs(x) < 2.6 + r && z > -36 && z < 12) return false;
+      if (pondEdge(x, z) < r + pondGap) return false;
+      if (insideZen(x, z, r + 0.4)) return false;
+      for (const b of blockers) if (Math.hypot(x - b.x, z - b.z) < b.r + r) return false;
+      for (const b of bushes) if (Math.hypot(x - b.x, z - b.z) < (b.r + r) * 0.8) return false;
+      return true;
+    }
+    function pickKind() {
+      let p = rnd();
+      for (let k = 0; k < SHRUB_KINDS.length; k++) if ((p -= SHRUB_KINDS[k].weight) < 0) return k;
+      return 0;
+    }
+    function tryAdd(x, z, r, kind, pondGap = 2.5) { if (fits(x, z, r, pondGap)) bushes.push({ x, z, r, kind }); }
+
+    /* Azaleas framing the far side of the pond, open towards the spawn so it can be seen. */
+    for (let i = 0; i < 14; i++) {
+      const a = i / 14 * Math.PI * 2 + rnd() * 0.2, d = pondRadius(a) + 1.8 + rnd() * 0.5;
+      if (a > 1.2 && a < 3.2 || i % 2) continue;
+      tryAdd(POND.x + Math.cos(a) * d, POND.z + Math.sin(a) * d, 1.0 + rnd() * 0.3, i % 3, 0.6);
+    }
+    /* Azaleas lining both sides of the walk to the torii. */
+    for (let z = 4; z > -30; z -= 5.5)
+      for (const side of [-1, 1])
+        tryAdd(side * (4.6 + rnd() * 0.8), z + (rnd() - 0.5) * 1.5, 0.9 + rnd() * 0.3,
+               Math.floor(rnd() * 3));
+    /* Clusters of the same kind scattered across the valley. */
+    for (let c = 0; c < this.data.clusters; c++) {
+      const a = rnd() * Math.PI * 2, d = 6 + Math.sqrt(rnd()) * 50;
+      const cx = Math.cos(a) * d, cz = Math.sin(a) * d, kind = pickKind();
+      const n = 2 + Math.floor(rnd() * 4);
+      for (let i = 0; i < n; i++)
+        tryAdd(cx + (rnd() - 0.5) * 6, cz + (rnd() - 0.5) * 6, 1.0 + rnd() * 0.9,
+               rnd() < 0.8 ? kind : pickKind());
+    }
+
+    const cards = SHRUB_KINDS.map(() => []);
+    for (const b of bushes) {
+      const kind = SHRUB_KINDS[b.kind], h = b.r * kind.tall;
+      const ground = terrainH(b.x, b.z), n = Math.round(10 + b.r * b.r * 14);
+      const tint = 0.9 + rnd() * 0.1;
+      for (let i = 0; i < n; i++) {
+        const a = rnd() * Math.PI * 2, up = -0.25 + rnd() * 1.25, k = 0.5 + rnd() * 0.5;
+        const ring = Math.sqrt(Math.max(0, 1 - Math.min(1, up) * Math.min(1, up)));
+        cards[b.kind].push({
+          x: b.x + Math.cos(a) * ring * b.r * k, z: b.z + Math.sin(a) * ring * b.r * k,
+          y: ground + h * 0.5 + up * h * 0.5 * k,
+          s: (0.55 + rnd() * 0.4) * (0.7 + b.r * 0.3), rot: rnd() * Math.PI,
+          /* Darker low in the mound: cheap ambient occlusion. */
+          shade: tint * (0.72 + 0.28 * (up + 0.25) / 1.25) });
+      }
+    }
+
+    const group = new THREE.Group(), dummy = new THREE.Object3D(), col = new THREE.Color();
+    const geo = crossedQuads(3);
+    SHRUB_KINDS.forEach((kind, ki) => {
+      const list = cards[ki];
+      if (!list.length) return;
+      const mesh = new THREE.InstancedMesh(geo,
+        new THREE.MeshLambertMaterial({ side: THREE.DoubleSide, alphaTest: 0.5,
+          map: shrubTexture(31 + ki * 977, kind.leaf, kind.flower, kind.flowers) }),
+        list.length);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      list.forEach((c, i) => {
+        dummy.position.set(c.x, c.y, c.z); dummy.rotation.set(0, c.rot, 0);
+        dummy.scale.setScalar(c.s); dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+        col.setRGB(c.shade, c.shade, c.shade);
+        mesh.setColorAt(i, col);
+      });
+      group.add(mesh);
+    });
+    this.el.setObject3D('mesh', group);
+  }
+});
+
 /* ---------- keep the camera on the ground ---------- */
 AFRAME.registerComponent('terrain-walk', {
   schema: { height: { default: 1.6 } },
   tick: function () {
     const p = this.el.object3D.position;
+    /* Stop at the koi pond's rocks instead of walking on the water. */
+    if (pondEdge(p.x, p.z) < 0.7) {
+      const a = Math.atan2(p.z - POND.z, p.x - POND.x), r = pondRadius(a) + 0.7;
+      p.x = POND.x + Math.cos(a) * r; p.z = POND.z + Math.sin(a) * r;
+    }
     p.y = terrainH(p.x, p.z) + this.data.height;
+  }
+});
+
+/* ---------- koi pond ---------- */
+/* [base, spot colours, spot count, fin colour, red crown on the head (tancho)] */
+const KOI_PATTERNS = [
+  { base: '#f4f1ea', spots: ['#e2421c'], n: 5, fin: '#f4efe6' },             // kohaku
+  { base: '#f4f1ea', spots: ['#e2421c', '#1d1d1f'], n: 8, fin: '#f4efe6' },  // sanke
+  { base: '#1d1d1f', spots: ['#e2421c', '#f4f1ea'], n: 8, fin: '#2a2a2c' },  // showa
+  { base: '#f2a516', spots: ['#ffd36b'], n: 3, fin: '#f7c04d' },             // ogon
+  { base: '#ff7a1a', spots: ['#ffb36b'], n: 3, fin: '#ff9a4a' },             // chagoi-ish orange
+  { base: '#f4f1ea', spots: [], n: 0, fin: '#f4efe6', crown: '#e2421c' }     // tancho
+];
+/* The body is a sphere with its poles along z, so canvas x runs around the
+   body (x = 0.75 is the back) and canvas y runs head (top) to tail. */
+function koiTexture(pat, seed) {
+  const W = 128, H = 64, c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d'), rnd = mulberry32(seed);
+  g.fillStyle = pat.base; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < pat.n; i++) {
+    const cx = W * (0.75 + (rnd() - 0.5) * 0.3), cy = H * (0.12 + rnd() * 0.66);
+    const rx = W * (0.06 + rnd() * 0.1), ry = H * (0.08 + rnd() * 0.12);
+    g.fillStyle = pat.spots[i % pat.spots.length];
+    for (const off of [0, -W]) {
+      g.beginPath(); g.ellipse(cx + off, cy, rx, ry, 0, 0, Math.PI * 2); g.fill();
+    }
+  }
+  if (pat.crown) { g.fillStyle = pat.crown; g.beginPath(); g.arc(W * 0.75, H * 0.14, W * 0.07, 0, Math.PI * 2); g.fill(); }
+  g.fillStyle = 'rgba(245,240,230,0.45)'; g.fillRect(W * 0.1, 0, W * 0.3, H);  // paler belly
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+function koiBodyGeometry() {
+  const g = new THREE.SphereGeometry(1, 18, 14);
+  g.rotateX(Math.PI / 2);                    // poles along z, head at +z
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const z = p.getZ(i), taper = z < 0 ? 1 - 0.62 * Math.pow(-z, 1.4) : 1 - 0.25 * z * z;
+    p.setXYZ(i, p.getX(i) * 0.075 * taper, p.getY(i) * 0.085 * taper, z * 0.3);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function koiFinGeometries() {
+  const V = (x, y) => new THREE.Vector2(x, y);
+  const tail = new THREE.ShapeGeometry(new THREE.Shape([V(0, 0), V(0.2, 0.11), V(0.15, 0), V(0.2, -0.11)]));
+  tail.rotateY(Math.PI / 2); tail.translate(0, 0, -0.26);          // shape x runs backwards
+  const dorsal = new THREE.ShapeGeometry(new THREE.Shape([V(0, 0), V(0.05, 0.05), V(0.2, 0.03), V(0.22, 0)]));
+  dorsal.rotateY(Math.PI / 2); dorsal.translate(0, 0.07, 0.08);
+  const fins = [tail, dorsal];
+  for (const side of [-1, 1]) {
+    const f = new THREE.ShapeGeometry(new THREE.Shape().absellipse(0.05, 0, 0.06, 0.028, 0, Math.PI * 2));
+    f.rotateX(-Math.PI / 2); f.rotateY(-0.7); f.rotateZ(-0.45);
+    if (side < 0) f.scale(-1, 1, 1);
+    f.translate(side * 0.05, -0.045, 0.12);
+    fins.push(f);
+  }
+  return fins;
+}
+/* Body and fins share a per-fish clock that bends them side to side, more towards the tail. */
+function koiMaterial(opts, time) {
+  const m = new THREE.MeshLambertMaterial(opts);
+  m.onBeforeCompile = function (shader) {
+    shader.uniforms.uTime = time;
+    shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+      `#include <begin_vertex>
+       float back = clamp(-transformed.z / 0.45, -0.3, 1.0) + 0.3;
+       transformed.x += sin(uTime * 7.0 - transformed.z * 9.0) * 0.045 * back * back;`);
+  };
+  m.customProgramCacheKey = function () { return 'koi-wiggle'; };
+  return m;
+}
+/* Faceted, slightly lumpy boulder; the noise is keyed on position so shared corners stay welded. */
+function rockGeometry(seed) {
+  const g = new THREE.IcosahedronGeometry(1, 1), p = g.attributes.position, v = new THREE.Vector3();
+  for (let i = 0; i < p.count; i++) {
+    v.fromBufferAttribute(p, i);
+    v.multiplyScalar(0.8 + fbm(v.x * 1.3 + seed, v.y * 1.3 + v.z * 1.1 + seed) * 0.5);
+    p.setXYZ(i, v.x, v.y, v.z);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+AFRAME.registerComponent('koi-pond', {
+  schema: { koi: { default: 10 } },
+  init: function () {
+    const rnd = mulberry32(1717), group = new THREE.Group(), N = 96, self = this;
+    const level = POND_GROUND - 0.22, floor = level - 0.85;
+    this.level = level;
+    const ring = [];
+    for (let i = 0; i < N; i++) {
+      const a = i / N * Math.PI * 2, r = pondRadius(a);
+      ring.push({ a, r, x: POND.x + Math.cos(a) * r, z: POND.z + Math.sin(a) * r });
+    }
+    /* A flat horizontal copy of the outline, scaled towards the centre. */
+    function outlineMesh(scale, y, material) {
+      const shape = new THREE.Shape(ring.map(p =>
+        new THREE.Vector2(Math.cos(p.a) * p.r * scale, -Math.sin(p.a) * p.r * scale)));
+      const geo = new THREE.ShapeGeometry(shape);
+      geo.rotateX(-Math.PI / 2);
+      const m = new THREE.Mesh(geo, material);
+      m.position.set(POND.x, y, POND.z);
+      return m;
+    }
+
+    /* Basin: a sloping earth wall from the cut in the grass down to a dark floor. */
+    const wpos = [], wcol = [], widx = [], top = new THREE.Color('#6b6150'), bot = new THREE.Color('#2f3a2c');
+    for (const p of ring) {
+      wpos.push(p.x, terrainH(p.x, p.z) + 0.1, p.z);
+      wpos.push(POND.x + Math.cos(p.a) * p.r * 0.84, floor, POND.z + Math.sin(p.a) * p.r * 0.84);
+      wcol.push(top.r, top.g, top.b, bot.r, bot.g, bot.b);
+    }
+    for (let i = 0; i < N; i++) {
+      const a = i * 2, b = ((i + 1) % N) * 2;
+      widx.push(a, a + 1, b, b, a + 1, b + 1);
+    }
+    const wall = new THREE.BufferGeometry();
+    wall.setAttribute('position', new THREE.Float32BufferAttribute(wpos, 3));
+    wall.setAttribute('color', new THREE.Float32BufferAttribute(wcol, 3));
+    wall.setIndex(widx); wall.computeVertexNormals();
+    group.add(new THREE.Mesh(wall, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })));
+    group.add(outlineMesh(0.84, floor, new THREE.MeshLambertMaterial({ color: '#34432f' })));
+
+    /* Water: see-through teal with drifting ripples in the normals. */
+    this.waterTime = { value: 0 };
+    const water = new THREE.MeshPhongMaterial({ color: '#2c6b70', specular: '#8fa9b0', shininess: 60,
+      transparent: true, opacity: 0.38, depthWrite: false });
+    water.onBeforeCompile = function (shader) {
+      shader.uniforms.uTime = self.waterTime;
+      shader.vertexShader = 'varying vec2 vWorldXZ;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n vWorldXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
+      shader.fragmentShader = 'uniform float uTime;\nvarying vec2 vWorldXZ;\n' + shader.fragmentShader
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+          vec2 q = vWorldXZ;
+          vec3 rip = vec3(sin(q.x * 2.7 + uTime * 1.3) + sin(q.y * 1.9 - uTime * 0.9 + q.x * 0.7), 0.0,
+                          cos(q.y * 3.1 + uTime * 1.1) + sin(q.x * 1.6 - q.y * 2.2 + uTime * 0.8));
+          normal = normalize(normal + (viewMatrix * vec4(rip, 0.0)).xyz * 0.06);`);
+    };
+    water.customProgramCacheKey = function () { return 'pond-water'; };
+    group.add(outlineMesh(1, level, water));
+
+    /* Rounded stones all along the rim, a few big ones as accents. */
+    const rocks = [];
+    for (let i = 0; i < N; i += 2) {
+      const p = ring[i], s = 0.32 + rnd() * 0.32, out = 0.05 + rnd() * 0.3;
+      rocks.push({ a: p.a, d: p.r + out, s, sx: 1 + rnd() * 0.6, sy: 0.5 + rnd() * 0.35, sz: 1 + rnd() * 0.4 });
+      if (rnd() < 0.35)
+        rocks.push({ a: p.a + 0.03, d: p.r + out + s + 0.25, s: s * 0.6, sx: 1.2, sy: 0.6, sz: 1 });
+    }
+    for (const a of [0.4, 2.3, 4.4])
+      rocks.push({ a, d: pondRadius(a) + 0.5, s: 0.9 + rnd() * 0.35, sx: 1.3, sy: 0.75, sz: 1 });
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    [rockGeometry(3), rockGeometry(11)].forEach((geo, gi) => {
+      const mine = rocks.filter((_, i) => i % 2 === gi);
+      const mesh = new THREE.InstancedMesh(geo,
+        new THREE.MeshLambertMaterial({ flatShading: true }), mine.length);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      mine.forEach((r, i) => {
+        const x = POND.x + Math.cos(r.a) * r.d, z = POND.z + Math.sin(r.a) * r.d;
+        dummy.position.set(x, terrainH(x, z) - r.s * 0.25, z);
+        dummy.rotation.set(0, rnd() * Math.PI * 2, 0);
+        dummy.scale.set(r.s * r.sx, r.s * r.sy, r.s * r.sz); dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+        col.setHSL(0.1 + rnd() * 0.04, 0.05 + rnd() * 0.05, 0.42 + rnd() * 0.18, THREE.SRGBColorSpace);
+        mesh.setColorAt(i, col);
+      });
+      group.add(mesh);
+    });
+
+    /* Lily pads in a few loose clusters, some carrying a lotus flower. */
+    const padGeo = new THREE.CircleGeometry(1, 20, 0.35, Math.PI * 2 - 0.35);
+    padGeo.rotateX(-Math.PI / 2);
+    const pads = [];
+    for (const ca of [0.9, 3.0, 5.0]) {
+      const cr = pondRadius(ca) * 0.6;
+      for (let i = 0; i < 6; i++) {
+        const a = ca + (rnd() - 0.5) * 0.7, r = cr + (rnd() - 0.5) * 1.4;
+        pads.push({ x: POND.x + Math.cos(a) * r, z: POND.z + Math.sin(a) * r, s: 0.2 + rnd() * 0.22, rot: rnd() * 6.3 });
+      }
+    }
+    const padMesh = new THREE.InstancedMesh(padGeo,
+      new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), pads.length);
+    pads.forEach((p, i) => {
+      dummy.position.set(p.x, level + 0.012 + i * 0.002, p.z);
+      dummy.rotation.set(0, p.rot, 0); dummy.scale.setScalar(p.s); dummy.updateMatrix();
+      padMesh.setMatrixAt(i, dummy.matrix);
+      col.setHSL(0.27 + rnd() * 0.05, 0.45 + rnd() * 0.15, 0.3 + rnd() * 0.1, THREE.SRGBColorSpace);
+      padMesh.setColorAt(i, col);
+    });
+    group.add(padMesh);
+
+    const petalGeo = new THREE.SphereGeometry(1, 8, 6);
+    petalGeo.translate(0, 1, 0);                       // base of the petal at the origin
+    const petals = [];
+    for (let k = 0; k < pads.length; k += 4) {
+      const p = pads[k], y = level + 0.03;
+      for (let i = 0; i < 9; i++)
+        petals.push({ x: p.x, y, z: p.z, yaw: i / 9 * Math.PI * 2, tilt: 1.0, s: [0.045, 0.085, 0.024], l: 0.8 });
+      for (let i = 0; i < 6; i++)
+        petals.push({ x: p.x, y, z: p.z, yaw: i / 6 * Math.PI * 2 + 0.3, tilt: 0.45, s: [0.038, 0.075, 0.02], l: 0.9 });
+      petals.push({ x: p.x, y: y + 0.03, z: p.z, yaw: 0, tilt: 0, s: [0.035, 0.016, 0.035], l: -1 });
+    }
+    const lotus = new THREE.InstancedMesh(petalGeo, new THREE.MeshLambertMaterial(), petals.length);
+    dummy.rotation.order = 'YXZ';
+    petals.forEach((p, i) => {
+      dummy.position.set(p.x, p.y, p.z); dummy.rotation.set(p.tilt, p.yaw, 0);
+      dummy.scale.set(p.s[0], p.s[1], p.s[2]); dummy.updateMatrix();
+      lotus.setMatrixAt(i, dummy.matrix);
+      if (p.l < 0) col.setHSL(0.14, 0.9, 0.6, THREE.SRGBColorSpace);
+      else col.setHSL(0.93, 0.7, p.l, THREE.SRGBColorSpace);
+      lotus.setColorAt(i, col);
+    });
+    group.add(lotus);
+
+    /* Koi, each wandering between random points inside the pond. */
+    const bodyGeo = koiBodyGeometry(), finGeos = koiFinGeometries();
+    this.fish = [];
+    for (let i = 0; i < this.data.koi; i++) {
+      const pat = KOI_PATTERNS[i % KOI_PATTERNS.length], time = { value: rnd() * 10 };
+      const obj = new THREE.Group();
+      obj.add(new THREE.Mesh(bodyGeo, koiMaterial({ map: koiTexture(pat, 900 + i) }, time)));
+      const finMat = koiMaterial({ color: pat.fin, side: THREE.DoubleSide }, time);
+      for (const g of finGeos) obj.add(new THREE.Mesh(g, finMat));
+      obj.scale.setScalar(1.0 + rnd() * 0.5);
+      const start = this.randomSpot(rnd);
+      this.fish.push({ obj, time, x: start.x, z: start.z, heading: rnd() * Math.PI * 2,
+        target: this.randomSpot(rnd), speed: 0.22 + rnd() * 0.2, turn: 0.7 + rnd() * 0.6,
+        depth: 0.14 + rnd() * 0.2, phase: rnd() * 10 });
+      group.add(obj);
+    }
+    this.el.setObject3D('mesh', group);
+  },
+  randomSpot: function (rand) {
+    const a = rand() * Math.PI * 2, r = pondRadius(a) * 0.68 * Math.sqrt(rand());
+    return { x: POND.x + Math.cos(a) * r, z: POND.z + Math.sin(a) * r };
+  },
+  tick: function (t, dt) {
+    if (!dt) return;
+    const s = Math.min(dt, 50) / 1000, time = t / 1000;
+    this.waterTime.value = time;
+    for (const f of this.fish) {
+      if (pondEdge(f.x, f.z) > -0.9) f.target = { x: POND.x, z: POND.z };
+      const dx = f.target.x - f.x, dz = f.target.z - f.z;
+      if (dx * dx + dz * dz < 0.4) f.target = this.randomSpot(Math.random);
+      let turn = Math.atan2(dx, dz) - f.heading;
+      turn = Math.atan2(Math.sin(turn), Math.cos(turn));
+      f.heading += THREE.MathUtils.clamp(turn, -f.turn * s, f.turn * s);
+      const sp = f.speed * (0.75 + 0.35 * Math.sin(time * 0.6 + f.phase));
+      f.x += Math.sin(f.heading) * sp * s; f.z += Math.cos(f.heading) * sp * s;
+      f.time.value += s * sp / 0.3;                  // tail beats faster when swimming faster
+      f.obj.position.set(f.x, this.level - f.depth + Math.sin(time * 0.4 + f.phase) * 0.05, f.z);
+      f.obj.rotation.y = f.heading;
+    }
+  }
+});
+
+/* ---------- stone helpers ---------- */
+/* Grey stone with moss on the upward-facing parts, in patches. */
+function mossColors(geo, amount, seed) {
+  const p = geo.attributes.position, n = geo.attributes.normal, col = new Float32Array(p.count * 3);
+  const stone = new THREE.Color('#a19d91'), moss = new THREE.Color('#5d7f3c'), c = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const patch = fbm(p.getX(i) * 3 + seed, p.getZ(i) * 3 - seed + p.getY(i));
+    const m = THREE.MathUtils.smoothstep(n.getY(i) + (patch - 0.5) * 0.7, 0.35, 0.75) * amount;
+    c.copy(stone).lerp(moss, m);
+    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
+}
+/* Concatenate already-placed geometries into one (positions and normals only). */
+function mergeGeometries(list) {
+  const pos = [], norm = [];
+  for (let g of list) {
+    if (g.index) g = g.toNonIndexed();
+    pos.push(...g.attributes.position.array); norm.push(...g.attributes.normal.array);
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  out.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  return out;
+}
+
+/* ---------- stone lanterns (toro) ---------- */
+function hexPrism(rTop, rBot, h, y, sides = 6) {
+  const g = new THREE.CylinderGeometry(rTop, rBot, h, sides);
+  g.translate(0, y + h / 2, 0);
+  return g;
+}
+/* Light chamber: sill, lintel and corner posts in stone around a glowing core. */
+function fireBox(r, h, y, stone, glow) {
+  stone.push(hexPrism(r * 1.12, r * 1.12, 0.04, y), hexPrism(r * 1.12, r * 1.12, 0.04, y + h - 0.04));
+  for (let k = 0; k < 6; k++) {
+    const a = k / 6 * Math.PI * 2, g = new THREE.BoxGeometry(r * 0.3, h, r * 0.3);
+    g.rotateY(a); g.translate(Math.sin(a) * r, y + h / 2, Math.cos(a) * r);
+    stone.push(g);
+  }
+  glow.push(hexPrism(r * 0.8, r * 0.8, h - 0.06, y + 0.03));
+}
+/* Hexagonal roof with the little upturned corners, topped by the jewel (hoju). */
+function lanternRoof(r, h, y, stone) {
+  stone.push(hexPrism(r, r, 0.05, y), hexPrism(r * 0.16, r, h, y + 0.05));
+  for (let k = 0; k < 6; k++) {
+    const a = k / 6 * Math.PI * 2, g = new THREE.SphereGeometry(r * 0.09, 6, 4);
+    g.translate(Math.sin(a) * r, y + 0.07, Math.cos(a) * r);
+    stone.push(g);
+  }
+  const top = y + 0.05 + h, j = r * 0.16;
+  const bead = new THREE.SphereGeometry(j, 10, 8);
+  bead.scale(1, 1.15, 1); bead.translate(0, top + j, 0);
+  const tip = new THREE.ConeGeometry(j * 0.45, j * 0.8, 8);
+  tip.translate(0, top + j * 2.5, 0);
+  stone.push(bead, tip);
+}
+function strut(a, b, r, stone) {
+  const dir = new THREE.Vector3().subVectors(b, a), g = new THREE.CylinderGeometry(r, r, dir.length(), 6);
+  g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize()));
+  g.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
+  stone.push(g);
+}
+/* Fills stone/glow with placed parts and returns the height of the light. */
+function buildLantern(type, stone, glow) {
+  if (type === 'yukimi') {
+    for (let k = 0; k < 4; k++) {
+      const a = k / 4 * Math.PI * 2 + Math.PI / 4, V = (r, y) => new THREE.Vector3(Math.sin(a) * r, y, Math.cos(a) * r);
+      strut(V(0.2, 0.56), V(0.42, 0.3), 0.05, stone);
+      strut(V(0.42, 0.3), V(0.5, 0), 0.045, stone);
+    }
+    stone.push(hexPrism(0.27, 0.27, 0.08, 0.52));
+    fireBox(0.2, 0.26, 0.6, stone, glow);
+    lanternRoof(0.8, 0.2, 0.86, stone);
+    return 0.73;
+  }
+  if (type === 'oki') {
+    stone.push(hexPrism(0.22, 0.25, 0.06, 0));
+    fireBox(0.15, 0.2, 0.06, stone, glow);
+    lanternRoof(0.32, 0.13, 0.26, stone);
+    return 0.16;
+  }
+  stone.push(hexPrism(0.4, 0.44, 0.18, 0));          // ground slab
+  stone.push(hexPrism(0.26, 0.34, 0.12, 0.18));      // lotus base
+  stone.push(hexPrism(0.12, 0.14, 0.95, 0.3, 12));   // pillar
+  stone.push(hexPrism(0.16, 0.16, 0.06, 0.72, 12));  // band round the pillar
+  stone.push(hexPrism(0.36, 0.18, 0.2, 1.25));       // platform flaring out
+  fireBox(0.25, 0.34, 1.45, stone, glow);
+  lanternRoof(0.52, 0.26, 1.79, stone);
+  return 1.62;
+}
+let lanternMaterials = null;
+AFRAME.registerComponent('stone-lantern', {
+  schema: { type: { default: 'kasuga' }, moss: { default: 0.5 }, seed: { default: 1 },
+            light: { default: false } },
+  init: function () {
+    lanternMaterials = lanternMaterials || {
+      stone: new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+      glow: new THREE.MeshLambertMaterial({ color: '#ffdf9b', emissive: '#ffb347', emissiveIntensity: 0.9 })
+    };
+    const stone = [], glow = [], lightY = buildLantern(this.data.type, stone, glow);
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(mossColors(mergeGeometries(stone), this.data.moss, this.data.seed * 7.3),
+      lanternMaterials.stone);
+    body.castShadow = true; body.receiveShadow = true;
+    group.add(body, new THREE.Mesh(mergeGeometries(glow), lanternMaterials.glow));
+    this.el.setObject3D('mesh', group);
+    if (this.data.light) {
+      const l = document.createElement('a-entity');
+      l.setAttribute('position', '0 ' + lightY + ' 0');
+      l.setAttribute('light', 'type: point; color: #ffc247; intensity: 0.7; distance: 7');
+      this.el.appendChild(l);
+    }
+  }
+});
+
+/* ---------- rock groupings ---------- */
+/* One tall standing stone, then a flat-topped one, a low recumbent one and small accents. */
+function groupStones(g, rnd) {
+  const out = [{ x: g.x, z: g.z, w: 0.45 + rnd() * 0.2, h: 1.3 + rnd() * 0.7 }];
+  const extras = [[0.75, 0.6], [0.9, 0.38], [0.4, 0.4], [0.35, 0.28]], base = rnd() * Math.PI * 2;
+  for (let i = 1; i < g.n; i++) {
+    const [w, h] = extras[i - 1], a = base + i * 2.1 + rnd() * 0.6, d = 1.1 + rnd() * 0.8 + (i > 2 ? 0.7 : 0);
+    out.push({ x: g.x + Math.cos(a) * d, z: g.z + Math.sin(a) * d,
+               w: w * (0.85 + rnd() * 0.4), h: h * (0.85 + rnd() * 0.4) });
+  }
+  return out;
+}
+AFRAME.registerComponent('garden-rocks', {
+  init: function () {
+    const rnd = mulberry32(606), stones = [];
+    for (const g of ROCK_GROUPS) stones.push(...groupStones(g, rnd));
+    for (const isl of ZEN.islands)
+      for (const [du, dv, w, h] of isl.stones)
+        stones.push({ ...zenWorld(isl.u + du, isl.v + dv), w, h, lift: 0.05 });
+    const group = new THREE.Group(), dummy = new THREE.Object3D(), col = new THREE.Color();
+    [5, 19, 42].forEach((seed, gi) => {
+      const mine = stones.filter((_, i) => i % 3 === gi);
+      const geo = mossColors(rockGeometry(seed), 1, seed);
+      const mesh = new THREE.InstancedMesh(geo,
+        new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }), mine.length);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      mine.forEach((s, i) => {
+        /* About a third of each stone is buried, as stones are set in a garden. */
+        dummy.position.set(s.x, terrainH(s.x, s.z) + (s.lift || 0) + s.h * 0.25, s.z);
+        dummy.rotation.set((rnd() - 0.5) * 0.16, rnd() * Math.PI * 2, (rnd() - 0.5) * 0.16);
+        dummy.scale.set(s.w, s.h * 0.75, s.w * (0.75 + rnd() * 0.4)); dummy.updateMatrix();
+        mesh.setMatrixAt(i, dummy.matrix);
+        const v = 0.8 + rnd() * 0.2;
+        mesh.setColorAt(i, col.setRGB(v, v, v));
+      });
+      group.add(mesh);
+    });
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- zen gravel garden ---------- */
+/* Straight rake lines across the bed, concentric rings round each moss island. */
+function zenGravelTexture() {
+  const W = 1024, H = Math.round(W * ZEN.d / ZEN.w), px = W / ZEN.w, sp = 0.075 * px;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d'), rnd = mulberry32(77);
+  g.fillStyle = '#ddd7c8'; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 9000; i++) {
+    g.fillStyle = rnd() < 0.5 ? 'rgba(150,140,120,0.35)' : 'rgba(255,255,250,0.5)';
+    g.fillRect(rnd() * W, rnd() * H, 1.5, 1.5);
+  }
+  const toPx = (u, v) => [(u / ZEN.w + 0.5) * W, (v / ZEN.d + 0.5) * H];
+  function groove(draw) {
+    g.strokeStyle = 'rgba(110,100,85,0.42)'; g.lineWidth = sp * 0.32; draw(0);
+    g.strokeStyle = 'rgba(255,253,246,0.6)'; g.lineWidth = sp * 0.22; draw(sp * 0.33);
+  }
+  g.save();
+  g.beginPath(); g.rect(0, 0, W, H);
+  for (const isl of ZEN.islands) {
+    const [cx, cy] = toPx(isl.u, isl.v);
+    g.moveTo(cx + isl.ring * px, cy); g.arc(cx, cy, isl.ring * px, 0, Math.PI * 2);
+  }
+  g.clip('evenodd');
+  for (let y = sp / 2; y < H; y += sp)
+    groove(o => { g.beginPath(); g.moveTo(0, y + o); g.lineTo(W, y + o); g.stroke(); });
+  g.restore();
+  for (const isl of ZEN.islands) {
+    const [cx, cy] = toPx(isl.u, isl.v);
+    for (let r = isl.moss + 0.12; r <= isl.ring; r += 0.075)
+      groove(o => { g.beginPath(); g.arc(cx, cy, r * px + o, 0, Math.PI * 2); g.stroke(); });
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+}
+AFRAME.registerComponent('zen-garden', {
+  init: function () {
+    const group = new THREE.Group(), rnd = mulberry32(31);
+    /* Gravel bed, draped over the (nearly flat) ground. Built in the bed's own frame. */
+    const geo = new THREE.PlaneGeometry(ZEN.w, ZEN.d, 28, 18);
+    geo.rotateX(-Math.PI / 2);
+    const p = geo.attributes.position;
+    for (let i = 0; i < p.count; i++) {
+      const w = zenWorld(p.getX(i), p.getZ(i));
+      p.setY(i, terrainH(w.x, w.z) + 0.035);
+    }
+    geo.computeVertexNormals();
+    const bed = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: zenGravelTexture() }));
+    bed.position.set(ZEN.x, 0, ZEN.z); bed.rotation.y = ZEN.rot; bed.receiveShadow = true;
+    group.add(bed);
+
+    /* Moss islands under the stones. */
+    const mossMat = new THREE.MeshLambertMaterial({ color: '#5b8a3a' });
+    for (const isl of ZEN.islands) {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 18, 6, 0, Math.PI * 2, 0, Math.PI / 2), mossMat);
+      const w = zenWorld(isl.u, isl.v);
+      m.position.set(w.x, terrainH(w.x, w.z) + 0.03, w.z);
+      m.rotation.y = ZEN.rot; m.scale.set(isl.moss, 0.13, isl.moss * 0.85);
+      m.receiveShadow = true;
+      group.add(m);
+    }
+
+    /* Kerb of small dressed stones round the bed. */
+    const kerb = [], L = 0.45;
+    for (const [len, across, alongU] of [[ZEN.w, ZEN.d, true], [ZEN.d, ZEN.w, false]])
+      for (const side of [-1, 1])
+        for (let t = -len / 2 + L / 2; t < len / 2 + 0.1; t += L)
+          kerb.push(alongU ? { u: t, v: side * (across / 2 + 0.08), turn: 0 }
+                           : { u: side * (across / 2 + 0.08), v: t, turn: Math.PI / 2 });
+    const kmesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+      new THREE.MeshLambertMaterial(), kerb.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    kerb.forEach((k, i) => {
+      const w = zenWorld(k.u, k.v);
+      dummy.position.set(w.x, terrainH(w.x, w.z) + 0.03, w.z);
+      dummy.rotation.set(0, ZEN.rot + k.turn + (rnd() - 0.5) * 0.06, 0);
+      dummy.scale.set(L - 0.03, 0.14, 0.16); dummy.updateMatrix();
+      kmesh.setMatrixAt(i, dummy.matrix);
+      kmesh.setColorAt(i, col.setHSL(0.1, 0.05, 0.5 + rnd() * 0.12, THREE.SRGBColorSpace));
+    });
+    kmesh.castShadow = true; kmesh.receiveShadow = true;
+    group.add(kmesh);
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- put a markup landmark on the ground ---------- */
+AFRAME.registerComponent('on-ground', {
+  init: function () {
+    const p = AFRAME.utils.coordinates.parse(this.el.getDOMAttribute('position') || '0 0 0');
+    this.el.setAttribute('position', { x: p.x, y: terrainH(p.x, p.z), z: p.z });
   }
 });
 
 /* ---------- scatter trees across the terrain ---------- */
 AFRAME.registerComponent('populate', {
   init: function () {
-    const spots = [
-      { x:-11, z:-13, seed:3,  trunk:3.1, r:0.40, hue: 0, s:1.15 },
-      { x:  9, z:-22, seed:8,  trunk:2.7, r:0.33, hue: 8, s:1.00 },
-      { x:-24, z: -6, seed:15, trunk:2.3, r:0.28, hue:-6, s:0.90 },
-      { x: 22, z: -4, seed:21, trunk:2.9, r:0.36, hue: 4, s:1.05 },
-      { x: -6, z: 16, seed:27, trunk:2.5, r:0.30, hue:-3, s:0.95 },
-      { x: 30, z:-30, seed:34, trunk:3.3, r:0.42, hue: 6, s:1.20 },
-      { x:-34, z:-26, seed:41, trunk:3.0, r:0.38, hue:-8, s:1.10 }
-    ];
-    for (const s of spots) {
+    for (const s of TREE_SPOTS) {
       const e = document.createElement('a-entity');
       e.setAttribute('position', s.x + ' ' + terrainH(s.x, s.z) + ' ' + s.z);
       e.setAttribute('cherry-tree', 'seed: ' + s.seed + '; trunk: ' + s.trunk +
         '; radius: ' + s.r + '; hue: ' + s.hue + '; blossomScale: ' + s.s);
       this.el.appendChild(e);
     }
+    LANTERNS.forEach((l, i) => {
+      const e = document.createElement('a-entity');
+      /* The pond's snow-viewing lantern stands with its feet in the water. */
+      const y = l.water ? POND_GROUND - 0.22 : terrainH(l.x, l.z) + (l.lift || 0);
+      e.setAttribute('position', l.x + ' ' + y + ' ' + l.z);
+      e.setAttribute('rotation', '0 ' + l.rot + ' 0');
+      e.setAttribute('stone-lantern', 'type: ' + l.type + '; moss: ' + l.moss +
+        '; seed: ' + (i + 1) + '; light: ' + !!l.light);
+      this.el.appendChild(e);
+    });
   }
 });
 });
@@ -368,6 +1110,7 @@ AFRAME.registerComponent('populate', {
 <a-scene fog="type: exponential; color: #d5ecf8; density: 0.0075"
          shadow="type: pcfsoft"
          renderer="colorManagement: true; antialias: true"
+         ambience="src: sounds/yuliana-yurukova-bird-chirps-343624.mp3; volume: 0.5"
          populate>
 
   <a-entity gradient-sky></a-entity>
@@ -383,33 +1126,26 @@ AFRAME.registerComponent('populate', {
 
   <a-entity terrain></a-entity>
   <a-entity grass-field></a-entity>
+  <a-entity shrubs></a-entity>
   <a-entity petal-storm></a-entity>
 
-  <a-entity position="14 0.12 -16">
-    <a-circle radius="5.4" rotation="-90 0 0"
-      material="color: #6fb9c9; roughness: 0.12; metalness: 0.25; opacity: 0.9; transparent: true"></a-circle>
-    <a-torus radius="5.5" radius-tubular="0.28" rotation="-90 0 0" position="0 -0.12 0"
-      material="color: #8d8577; roughness: 1" shadow="cast: true; receive: true"></a-torus>
-  </a-entity>
+  <a-entity koi-pond></a-entity>
+  <a-entity garden-rocks></a-entity>
+  <a-entity zen-garden></a-entity>
 
-  <a-entity position="0 0 -34" scale="1.5 1.5 1.5">
+  <a-entity position="0 0 -34" on-ground scale="1.5 1.5 1.5">
     <a-cylinder position="-2 2.4 0" radius="0.22" height="4.8" material="color: #c4462f; roughness: 0.85" shadow="cast: true"></a-cylinder>
     <a-cylinder position="2 2.4 0" radius="0.22" height="4.8" material="color: #c4462f; roughness: 0.85" shadow="cast: true"></a-cylinder>
     <a-box position="0 4.9 0" width="5.6" height="0.34" depth="0.46" material="color: #a83a26; roughness: 0.85" shadow="cast: true"></a-box>
     <a-box position="0 4.2 0" width="4.4" height="0.24" depth="0.34" material="color: #c4462f; roughness: 0.85" shadow="cast: true"></a-box>
   </a-entity>
 
-  <a-entity position="-5 0 -7">
-    <a-cylinder position="0 0.3 0" radius="0.42" height="0.6" material="color: #9a978d; roughness: 1" shadow="cast: true; receive: true"></a-cylinder>
-    <a-cylinder position="0 1.0 0" radius="0.16" height="0.9" material="color: #a5a299; roughness: 1" shadow="cast: true"></a-cylinder>
-    <a-box position="0 1.65 0" width="0.66" height="0.5" depth="0.66" material="color: #b0ada3; roughness: 1" shadow="cast: true"></a-box>
-    <a-cone position="0 2.05 0" radius-bottom="0.62" radius-top="0.1" height="0.42" material="color: #9a978d; roughness: 1" shadow="cast: true"></a-cone>
-    <a-sphere position="0 1.65 0" radius="0.17" material="color: #ffdf9b; emissive: #ffc247; emissiveIntensity: 0.9"></a-sphere>
-    <a-entity position="0 1.65 0" light="type: point; color: #ffc247; intensity: 0.7; distance: 7"></a-entity>
-  </a-entity>
 
   <a-entity id="rig" position="0 1.6 8" terrain-walk wasd-controls="acceleration: 45" look-controls>
-    <a-camera far="600">
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, bypassing the pond-edge stop in
+         terrain-walk (and doubling the walking speed). The rig does the moving. -->
+    <a-camera far="600" wasd-controls="enabled: false" look-controls="enabled: false">
       <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
     </a-camera>
   </a-entity>
