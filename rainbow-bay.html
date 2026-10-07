@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Rainbow Bay</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/routes.js"></script>
+<script src="js/portal.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(40,70,96,.6); color: #eef6fb; padding: 10px 14px;
+    border: 1px solid rgba(220,236,248,.3); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #ffffff; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+const S = THREE.MathUtils.smoothstep;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- value noise / fbm ---------- */
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+/* Sharp-crested noise for the mountains: folded so the peaks come out as ridges. */
+function ridged(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 5; i++) {
+    const n = 1 - Math.abs(2 * vnoise(x * f, y * f) - 1);
+    s += amp * n * n; f *= 2.03; amp *= 0.5;
+  }
+  return s;
+}
+
+/* The sun is low behind you. A rainbow is always a circle round the point
+   straight opposite the sun, so it stands out over the bay, above the
+   mountains, with its top at 42° minus the sun's height. */
+const SUN = new THREE.Vector3(0.18, 0.3, 0.94).normalize();
+/* Shader colours are written straight to the screen, so they are sRGB. */
+const FOG_HEX = '#aebfcc', FOG_DENSITY = 0.0034;
+function srgb(hex) { const n = parseInt(hex.slice(1), 16); return new THREE.Vector3((n >> 16) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); }
+
+/* ---------- the cove: a small beach between two rocky headlands ---------- */
+/* Where the sand meets the water. It bends back at the middle into a cove. */
+function shoreZ(x) { return 2 - 0.028 * Math.min(x * x, 196); }
+function headland(x, z) {
+  const ax = Math.abs(x);
+  return S(ax, 11, 19) * S(z, -26, -2) * (2.5 + fbm(x * 0.09 + 7, z * 0.09) * 9);
+}
+function terrainH(x, z) {
+  const s = z - shoreZ(x);
+  let h = s * 0.09;                                                  /* the sand shelving into the bay */
+  h += S(s, 7, 20) * (2.6 + fbm(x * 0.05, z * 0.05) * 3.2);          /* dunes behind the beach */
+  h += (fbm(x * 0.35, z * 0.35) - 0.5) * 0.18 * S(s, -0.5, 2);       /* ripples in the dry sand */
+  return h + headland(x, z);
+}
+/* The same shelf, for the water shader: how deep the bay is at (x, z). */
+const SHORE_GLSL = `
+float waterDepth(vec2 p) {
+  return max(-(p.y - (2.0 - 0.028 * min(p.x * p.x, 196.0))) * 0.09, 0.0);
+}`;
+
+/* ---------- the mountains across the bay ---------- */
+const MTN = { x0: -450, x1: 450, z0: -370, z1: -110 };
+function mountainH(x, z) {
+  const rise = S(-z, 112, 170);                            /* straight up out of the water */
+  const tall = 1 - 0.55 * S(Math.abs(x + 30), 110, 380);   /* highest under the rainbow */
+  return -3 + rise * (ridged(x * 0.011, z * 0.011) * 100 * tall + 4);
+}
+function snowLine(x, z) { return 44 + (fbm(x * 0.03, z * 0.03) - 0.5) * 16; }
+
+/* The mountains as seen from the bay: a small panorama, one column per
+   compass bearing and one row per step of height above the horizon. The water
+   looks its reflections up in this instead of rendering the mountains a second
+   time; they are far enough away that bearing and elevation are all it needs.
+   Painted far to near, so nearer ridges cover the ones behind, as they do in
+   the real view. Colours are sRGB with the haze already applied. */
+const PANO_W = 256, PANO_H = 96, PANO_SPAN = 3.2, PANO_MAX = 0.5;
+const MTN_SEGS = [220, 70];
+function mountainColor(h, steep, x, z, out) {
+  if (h > snowLine(x, z) && steep < 0.5) return out.set('#eef2f6');
+  if (h < 2) return out.set('#57564f');
+  return out.set('#2f4c3a').lerp(new THREE.Color('#6e7177'),
+    S(h + steep * 26 + fbm(x * 0.05, z * 0.05) * 14, 28, 46));
+}
+let panoTexture = null;
+function panorama() {
+  if (panoTexture) return panoTexture;
+  const [nx, nz] = MTN_SEGS, dx = (MTN.x1 - MTN.x0) / nx, dz = (MTN.z1 - MTN.z0) / nz;
+  const data = new Uint8Array(PANO_W * PANO_H * 4), c = new THREE.Color();
+  const fog = new THREE.Color(FOG_HEX), sun = SUN;
+  for (let j = 0; j <= nz; j++) for (let i = 0; i <= nx; i++) {     /* j = 0 is the far edge */
+    const x = MTN.x0 + dx * i, z = MTN.z0 + dz * j, h = mountainH(x, z);
+    if (h <= 0) continue;
+    /* Slope and a simple sun-and-sky light, like the Lambert material gives. */
+    /* Sampled a mesh-cell apart, so it is as smooth as the mesh's own normals. */
+    const hx = (mountainH(x + dx, z) - mountainH(x - dx, z)) / (2 * dx);
+    const hz = (mountainH(x, z + dz) - mountainH(x, z - dz)) / (2 * dz);
+    const n = new THREE.Vector3(-hx, 1, -hz).normalize();
+    mountainColor(h, 1 - n.y, x, z, c);
+    c.multiplyScalar(0.62 + 0.75 * Math.max(n.dot(sun), 0));
+    const dist = Math.hypot(x, z);
+    c.lerp(fog, 1 - Math.exp(-Math.pow(FOG_DENSITY * dist, 2)));
+    c.convertLinearToSRGB();
+    const el = Math.atan2(h, dist), az = Math.atan2(x, -z), half = (dx * 0.6) / dist;
+    const b0 = Math.max(0, Math.floor((az - half) / PANO_SPAN * PANO_W + PANO_W / 2));
+    const b1 = Math.min(PANO_W - 1, Math.ceil((az + half) / PANO_SPAN * PANO_W + PANO_W / 2));
+    const top = Math.min(PANO_H - 1, Math.round(el / PANO_MAX * PANO_H));
+    for (let b = b0; b <= b1; b++) for (let r = 0; r <= top; r++) {
+      const k = (r * PANO_W + b) * 4;
+      data[k] = Math.min(c.r, 1) * 255; data[k + 1] = Math.min(c.g, 1) * 255; data[k + 2] = Math.min(c.b, 1) * 255;
+      data[k + 3] = 255;
+    }
+  }
+  panoTexture = new THREE.DataTexture(data, PANO_W, PANO_H, THREE.RGBAFormat);
+  panoTexture.magFilter = panoTexture.minFilter = THREE.LinearFilter;
+  panoTexture.needsUpdate = true;
+  return panoTexture;
+}
+
+/* ---------- the sky, shared by the dome and the water's reflections ---------- */
+const SKY_GLSL = `
+uniform vec3 uSun;
+uniform float uTime;
+float h3(vec3 p) {
+  p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+float n3(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+float fbm3(vec3 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) { v += a * n3(p); p *= 2.03; a *= 0.5; }
+  return v;
+}
+/* One band of a rainbow, u from its violet edge (0) to its red edge (1). */
+vec3 spectrum(float u) {
+  if (u <= 0.0 || u >= 1.0) return vec3(0.0);
+  vec3 c = vec3(smoothstep(0.5, 0.9, u) + 0.35 * smoothstep(0.25, 0.0, u),
+                smoothstep(0.2, 0.55, u) * smoothstep(1.0, 0.65, u),
+                smoothstep(0.6, 0.15, u));
+  return c * smoothstep(0.0, 0.18, u) * smoothstep(1.0, 0.8, u);
+}
+vec3 skyColor(vec3 d) {
+  d.y = abs(d.y);   /* below the horizon: the sky mirrored, as calm water shows it */
+  float y = d.y;
+  vec3 col = mix(vec3(0.70, 0.78, 0.84), vec3(0.22, 0.44, 0.76), pow(y, 0.55));
+  /* The shower has moved off over the mountains: that side is still heavy. */
+  float away = smoothstep(0.2, -0.9, d.z);
+  col = mix(col, vec3(0.43, 0.48, 0.56), away * smoothstep(0.0, 0.25, y) * 0.75);
+  /* Clouds on a plane overhead, thicker over the mountains. */
+  vec2 cp = d.xz / (y + 0.12) * 1.3 + vec2(uTime * 0.004, uTime * 0.0015);
+  float c = fbm3(vec3(cp, 1.7));
+  float cover = mix(0.6, 0.5, away);
+  float cl = smoothstep(cover, cover + 0.2, c) * smoothstep(0.0, 0.08, y);
+  col = mix(col, mix(vec3(1.0, 0.97, 0.93), vec3(0.58, 0.61, 0.67), away), cl * 0.85);
+  /* The sun, low behind you. */
+  float s = max(dot(d, uSun), 0.0);
+  col += vec3(1.0, 0.9, 0.7) * (pow(s, 900.0) * 3.0 + pow(s, 10.0) * 0.22);
+  /* The bow: primary at 42° from the antisolar point, a fainter secondary at
+     51° with its colours the other way round, the sky inside the primary a
+     shade brighter and the band between the two a shade darker. */
+  float a = degrees(acos(clamp(dot(d, -uSun), -1.0, 1.0)));
+  float shade = 1.0 + 0.07 * smoothstep(41.0, 30.0, a) - 0.06 * smoothstep(43.0, 44.5, a) * smoothstep(51.5, 50.0, a);
+  col *= mix(1.0, shade, away);
+  vec3 bow = spectrum((a - 40.0) / 3.0) * 0.62 + spectrum((54.8 - a) / 3.8) * 0.1;
+  col += bow * (1.0 - cl * 0.5) * smoothstep(-0.02, 0.04, y);
+  return col;
+}`;
+
+AFRAME.registerComponent('bay-sky', {
+  init: function () {
+    this.mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: { uSun: { value: SUN }, uTime: { value: 0 } },
+      vertexShader: `
+        varying vec3 vDir;
+        void main() {
+          vDir = (modelMatrix * vec4(position, 1.0)).xyz - cameraPosition;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: SKY_GLSL + `
+        varying vec3 vDir;
+        void main() { gl_FragColor = vec4(min(skyColor(normalize(vDir)), 1.0), 1.0); }`
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(600, 48, 24), this.mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -1;
+    this.el.setObject3D('mesh', mesh);
+  },
+  /* Keep the sky centred on the viewer, so it is always infinitely far away. */
+  tick: function (t) {
+    this.mat.uniforms.uTime.value = t / 1000;
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+  }
+});
+
+/* ---------- the far shore ---------- */
+AFRAME.registerComponent('mountains', {
+  init: function () {
+    const geo = new THREE.PlaneGeometry(MTN.x1 - MTN.x0, MTN.z1 - MTN.z0, MTN_SEGS[0], MTN_SEGS[1]);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate((MTN.x0 + MTN.x1) / 2, 0, (MTN.z0 + MTN.z1) / 2);
+    const p = geo.attributes.position, n = p.count;
+    const hs = new Float32Array(n), xs = new Float32Array(n), zs = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      xs[i] = p.getX(i); zs[i] = p.getZ(i);
+      hs[i] = mountainH(xs[i], zs[i]);
+      p.setY(i, hs[i]);
+    }
+    geo.computeVertexNormals();
+    const nrm = geo.attributes.normal, colors = new Float32Array(n * 3), c = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      mountainColor(hs[i], 1 - nrm.getY(i), xs[i], zs[i], c);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    this.el.setObject3D('mesh', new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true })));
+  }
+});
+
+/* ---------- the beach ---------- */
+AFRAME.registerComponent('beach', {
+  init: function () {
+    const geo = new THREE.PlaneGeometry(160, 110, 200, 140);
+    geo.rotateX(-Math.PI / 2);
+    geo.translate(0, 0, 5);
+    const p = geo.attributes.position, colors = new Float32Array(p.count * 3);
+    const dry = new THREE.Color('#e9d7a8'), wet = new THREE.Color('#b59d74'),
+          bed = new THREE.Color('#6d7860'), grass = new THREE.Color('#a3ad6c'),
+          rock = new THREE.Color('#77716a'), rockDark = new THREE.Color('#57524d'), c = new THREE.Color();
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), z = p.getZ(i), h = terrainH(x, z), s = z - shoreZ(x);
+      p.setY(i, h);
+      if (h < 0) c.copy(wet).lerp(bed, S(-h, 0, 2.5));
+      else c.copy(wet).lerp(dry, S(h, 0.06, 0.5));
+      c.lerp(grass, S(s, 11, 18) * (0.3 + fbm(x * 0.2, z * 0.2) * 0.6));
+      const r = S(headland(x, z), 0.8, 2.2);
+      if (r > 0) c.lerp(rock.clone().lerp(rockDark, fbm(x * 0.4, z * 0.4)), r);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    mesh.receiveShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- the bay: a mirror for the sky, the rainbow and the mountains ---------- */
+AFRAME.registerComponent('bay-water', {
+  init: function () {
+    const fog = srgb(FOG_HEX);
+    this.mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      uniforms: {
+        uSun: { value: SUN }, uTime: { value: 0 }, uPano: { value: panorama() },
+        uFog: { value: fog }, uFogDensity: { value: FOG_DENSITY }
+      },
+      vertexShader: `
+        varying vec3 vW;
+        void main() {
+          vec4 w = modelMatrix * vec4(position, 1.0);
+          vW = w.xyz;
+          gl_Position = projectionMatrix * viewMatrix * w;
+        }`,
+      fragmentShader: SKY_GLSL + SHORE_GLSL + `
+        uniform sampler2D uPano;
+        uniform vec3 uFog;
+        uniform float uFogDensity;
+        varying vec3 vW;
+        void main() {
+          vec3 toEye = vW - cameraPosition;
+          float dist = length(toEye);
+          vec3 V = toEye / dist;
+          float t = uTime;
+          vec2 p = vW.xz;
+          /* Small ripples, calming with distance so the far reflections stay
+             crisp instead of shimmering into noise. */
+          float calm = 0.4 / (1.0 + dist * 0.05);
+          float gx = 0.036 * cos(p.x * 0.9 + t * 1.3) + 0.03 * cos(p.x * 1.7 - p.y * 1.1 + t * 1.9)
+                   + 0.02 * cos(p.x * 3.1 + p.y * 2.3 + t * 2.7);
+          float gz = 0.03 * cos(p.y * 1.1 + t * 1.1) + 0.02 * cos(p.y * 2.3 + p.x * 0.7 + t * 2.1)
+                   + 0.02 * cos(p.y * 3.4 - p.x * 2.7 + t * 3.1);
+          vec3 n = normalize(vec3(-gx * calm, 1.0, -gz * calm));
+          vec3 R = reflect(V, n);
+          R.y = abs(R.y);
+          vec3 refl = skyColor(R);
+          /* The mountains, from the panorama. */
+          float az = atan(R.x, -R.z), el = asin(clamp(R.y, 0.0, 1.0));
+          vec4 m = texture2D(uPano, vec2(az / ${PANO_SPAN.toFixed(2)} + 0.5, el / ${PANO_MAX.toFixed(2)}));
+          if (abs(az) < ${(PANO_SPAN / 2).toFixed(2)} && el < ${PANO_MAX.toFixed(2)}) refl = mix(refl, m.rgb, m.a);
+          float fres = 0.14 + 0.86 * pow(1.0 - max(dot(-V, n), 0.0), 2.5);
+          float depth = waterDepth(p);
+          vec3 body = mix(vec3(0.34, 0.64, 0.62), vec3(0.07, 0.22, 0.28), smoothstep(0.0, 3.0, depth));
+          vec3 col = mix(body, refl, fres);
+          float alpha = mix(smoothstep(0.0, 0.9, depth) * 0.97, 1.0, fres);
+          /* Foam where the water laps at the sand, running in and out. */
+          float lap = 0.07 + 0.05 * sin(t * 0.9 + p.x * 0.25);
+          float foam = smoothstep(lap + 0.035, lap, depth) * smoothstep(lap - 0.05, lap, depth)
+                     * smoothstep(0.35, 0.75, n3(vec3(p * 2.2, t * 0.6)));
+          col = mix(col, vec3(0.96, 0.97, 0.95), foam * 0.7);
+          alpha = max(alpha, foam * 0.75);
+          float f = 1.0 - exp(-pow(uFogDensity * dist, 2.0));
+          gl_FragColor = vec4(mix(col, uFog, f), alpha);
+        }`
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(2400, 2400, 1, 1), this.mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.frustumCulled = false;
+    this.el.setObject3D('mesh', mesh);
+  },
+  /* Follow the viewer across the plane so the water reaches the horizon. */
+  tick: function (t) {
+    this.mat.uniforms.uTime.value = t / 1000;
+    const cam = this.el.sceneEl.camera, o = this.el.object3D.position;
+    if (cam) { cam.getWorldPosition(o); o.y = 0; }
+  }
+});
+
+/* ---------- boulders on the headlands and at the water's edge ---------- */
+AFRAME.registerComponent('rocks', {
+  init: function () {
+    const rnd = mulberry32(808), spots = [];
+    while (spots.length < 70) {
+      const side = rnd() < 0.5 ? -1 : 1, x = side * (10.5 + rnd() * 16), z = -22 + rnd() * 30;
+      if (headland(x, z) < 1.2 && terrainH(x, z) > 1) continue;
+      spots.push({ x, z, r: 0.5 + Math.pow(rnd(), 2) * 2.4 });
+    }
+    /* A few small ones scattered on the beach itself. */
+    for (let i = 0; i < 10; i++) {
+      const x = (rnd() - 0.5) * 18, z = shoreZ(x) + 0.5 + rnd() * 8;
+      spots.push({ x, z, r: 0.15 + rnd() * 0.3 });
+    }
+    const mesh = new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1, 0),
+      new THREE.MeshLambertMaterial({ flatShading: true }), spots.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    spots.forEach((s, i) => {
+      dummy.position.set(s.x, terrainH(s.x, s.z) - s.r * 0.25, s.z);
+      dummy.rotation.set(rnd() * 3, rnd() * 3, rnd() * 3);
+      dummy.scale.set(s.r * (1 + rnd() * 0.5), s.r * (0.6 + rnd() * 0.3), s.r * (1 + rnd() * 0.4));
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      mesh.setColorAt(i, col.setHSL(0.08, 0.06 + rnd() * 0.06, 0.32 + rnd() * 0.16));
+    });
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- marram grass on the dunes, in tufts, leaning in the breeze ---------- */
+function bladeGeometry() {
+  const segs = 4, pos = [], uv = [], idx = [], norm = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, w = 0.04 * (1 - t * 0.9);
+    pos.push(-w, t, 0); uv.push(0, t); norm.push(0, 1, 0);
+    pos.push(w, t, 0); uv.push(1, t); norm.push(0, 1, 0);
+  }
+  for (let i = 0; i < segs; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  g.setIndex(idx);
+  return g;
+}
+AFRAME.registerComponent('dune-grass', {
+  schema: { tufts: { default: 420 } },
+  init: function () {
+    const rnd = mulberry32(55), self = this, blades = [];
+    for (let t = 0; t < this.data.tufts; t++) {
+      const x = (rnd() - 0.5) * 70, z = shoreZ(x) + 9 + rnd() * 28;
+      if (headland(x, z) > 1) continue;
+      const n = 8 + Math.floor(rnd() * 10);
+      for (let i = 0; i < n; i++) {
+        const bx = x + (rnd() - 0.5) * 0.7, bz = z + (rnd() - 0.5) * 0.7;
+        blades.push({ x: bx, z: bz, y: terrainH(bx, bz) - 0.05, rot: rnd() * Math.PI,
+                      lean: (rnd() - 0.5) * 0.5, h: 0.5 + rnd() * 0.6 });
+      }
+    }
+    const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+    mat.onBeforeCompile = function (shader) {
+      shader.uniforms.uTime = { value: 0 };
+      shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         float wx = instanceMatrix[3][0], wz = instanceMatrix[3][2];
+         float sway = sin(uTime * 1.7 + wx * 0.4 + wz * 0.3) * 0.5 + 0.6;
+         float h = uv.y * uv.y;
+         transformed.x += sway * h * 0.22;`);
+      self.shader = shader;
+    };
+    mat.customProgramCacheKey = function () { return 'dune-grass'; };
+    const mesh = new THREE.InstancedMesh(bladeGeometry(), mat, blades.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    blades.forEach((b, i) => {
+      dummy.position.set(b.x, b.y, b.z);
+      dummy.rotation.set(0, b.rot, b.lean);
+      dummy.scale.set(1, b.h, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      mesh.setColorAt(i, col.setHSL(0.17 + rnd() * 0.06, 0.35 + rnd() * 0.15, 0.45 + rnd() * 0.18));
+    });
+    mesh.frustumCulled = false;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) { if (this.shader) this.shader.uniforms.uTime.value = t / 1000; }
+});
+
+/* ---------- driftwood washed up on the sand ---------- */
+AFRAME.registerComponent('driftwood', {
+  init: function () {
+    const logs = [{ x: -4.5, z: 6.2, len: 3.4, r: 0.17, yaw: 0.5 },
+                  { x: 5.8, z: 4.4, len: 2.2, r: 0.12, yaw: -1.1 },
+                  { x: -8.2, z: 9.5, len: 1.6, r: 0.1, yaw: 1.9 }];
+    const group = new THREE.Group();
+    const mat = new THREE.MeshLambertMaterial({ color: '#a59683' });
+    for (const l of logs) {
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(l.r * 0.8, l.r, l.len, 9), mat);
+      m.position.set(l.x, terrainH(l.x, l.z) + l.r * 0.7, l.z);
+      m.rotation.set(0, l.yaw, Math.PI / 2 - 0.04);
+      m.castShadow = true; m.receiveShadow = true;
+      group.add(m);
+    }
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- gulls wheeling over the bay ---------- */
+AFRAME.registerComponent('gulls', {
+  schema: { count: { default: 7 } },
+  init: function () {
+    const rnd = mulberry32(77), body = new THREE.SphereGeometry(0.12, 8, 6);
+    /* One wing, reaching out along -x from the shoulder; the other is mirrored. */
+    const wing = new THREE.BufferGeometry();
+    wing.setAttribute('position', new THREE.Float32BufferAttribute(
+      [0, 0, -0.12, 0, 0, 0.14, -0.5, 0.04, 0.02,   -0.5, 0.04, 0.02, -1.0, -0.04, -0.12, 0, 0, -0.12], 3));
+    wing.computeVertexNormals();
+    const white = new THREE.MeshLambertMaterial({ color: '#f4f4f2', side: THREE.DoubleSide });
+    const grey = new THREE.MeshLambertMaterial({ color: '#c3c8cf', side: THREE.DoubleSide });
+    this.gulls = [];
+    for (let i = 0; i < this.data.count; i++) {
+      const g = new THREE.Group(), b = new THREE.Mesh(body, white);
+      b.scale.set(1, 1, 3);
+      const l = new THREE.Mesh(wing, grey), r = new THREE.Mesh(wing, grey);
+      r.scale.x = -1;
+      g.add(b, l, r);
+      this.el.object3D.add(g);
+      this.gulls.push({ g, l, r, cx: (rnd() - 0.5) * 30, cz: -14 - rnd() * 22, rad: 8 + rnd() * 18,
+                        y: 9 + rnd() * 14, w: (0.12 + rnd() * 0.1) * (rnd() < 0.5 ? -1 : 1),
+                        a: rnd() * 6.28, ph: rnd() * 6.28, s: 0.9 + rnd() * 0.3 });
+    }
+  },
+  tick: function (t) {
+    const time = t / 1000;
+    for (const q of this.gulls) {
+      const a = q.a + time * q.w;
+      q.g.position.set(q.cx + Math.cos(a) * q.rad, q.y + Math.sin(time * 0.3 + q.ph) * 1.2,
+                       q.cz + Math.sin(a) * q.rad);
+      /* Face along the circle, banked into the turn. */
+      const dx = -Math.sin(a) * q.w, dz = Math.cos(a) * q.w;
+      q.g.rotation.set(0, Math.atan2(-dx, -dz), 0);
+      q.g.rotateZ(Math.sign(q.w) * 0.25);
+      q.g.scale.setScalar(q.s * 1.6);
+      /* Bursts of flapping, then long glides. */
+      const flap = Math.max(0, Math.sin(time * 0.5 + q.ph)) * 0.45;
+      const ang = Math.sin(time * 7 + q.ph) * flap + 0.08;
+      q.l.rotation.z = -ang; q.r.rotation.z = ang;
+    }
+  }
+});
+
+/* ---------- keep the walker on the beach: into the shallows, never up the rocks ---------- */
+AFRAME.registerComponent('beach-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    p.x = Math.max(-10.5, Math.min(10.5, p.x));
+    p.z = Math.max(shoreZ(p.x) - 6, Math.min(14, p.z));
+    p.y = terrainH(p.x, p.z) + this.data.height;
+  }
+});
+
+/* ---------- put a markup landmark on the ground ---------- */
+AFRAME.registerComponent('on-ground', {
+  init: function () {
+    const p = AFRAME.utils.coordinates.parse(this.el.getDOMAttribute('position') || '0 0 0');
+    this.el.setAttribute('position', { x: p.x, y: terrainH(p.x, p.z), z: p.z });
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Rainbow Bay</b><br>WASD / arrows to walk &middot; drag to look &middot; the shallows are wadeable</div>
+
+<a-scene fog="type: exponential; color: #aebfcc; density: 0.0034"
+         shadow="type: pcfsoft"
+         renderer="colorManagement: true; antialias: true">
+
+  <a-entity bay-sky></a-entity>
+  <a-entity mountains></a-entity>
+  <a-entity bay-water></a-entity>
+  <a-entity beach></a-entity>
+  <a-entity rocks></a-entity>
+  <a-entity dune-grass></a-entity>
+  <a-entity driftwood></a-entity>
+  <a-entity gulls></a-entity>
+
+  <a-entity light="type: hemisphere; color: #dde8f2; groundColor: #c9b48c; intensity: 0.8"></a-entity>
+  <!-- The low sun, behind you: the rainbow is always on the far side from it. -->
+  <a-entity position="17 28 88"
+    light="type: directional; color: #fff1d6; intensity: 1.2; castShadow: true;
+           shadowMapWidth: 2048; shadowMapHeight: 2048;
+           shadowCameraLeft: -30; shadowCameraRight: 30;
+           shadowCameraTop: 30; shadowCameraBottom: -30;
+           shadowCameraFar: 200; shadowBias: -0.0012"></a-entity>
+
+  <a-entity id="rig" position="0 1.6 8" beach-walk
+            wasd-controls="acceleration: 40" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="1200" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Onward: a driftwood frame up in the dunes, behind where you arrive. -->
+  <a-entity position="0 0 15" rotation="0 180 0" on-ground>
+    <a-cylinder position="-1.2 1.55 0" rotation="0 0 2" radius="0.14" height="3.3"
+                material="color: #a59683; roughness: 1"></a-cylinder>
+    <a-cylinder position="1.2 1.5 0" rotation="0 0 -3" radius="0.12" height="3.2"
+                material="color: #9d8e7a; roughness: 1"></a-cylinder>
+    <a-cylinder position="0.05 3.15 0" rotation="0 0 93" radius="0.12" height="3.1"
+                material="color: #b0a28e; roughness: 1"></a-cylinder>
+    <a-plane class="portal" position="0 1.5 -0.05" width="2.2" height="3"
+             material="shader: flat; side: double"
+             portal="href: next; color: #bfe6a4; hover: #e9ffd8"></a-plane>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

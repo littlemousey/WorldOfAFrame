@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Balloon Meadow</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/routes.js"></script>
+<script src="js/portal.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(30,80,40,.55); color: #f0fbe8; padding: 10px 14px;
+    border: 1px solid rgba(220,250,200,.3); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #ffffff; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+const S = THREE.MathUtils.smoothstep;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- value noise / fbm ---------- */
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+
+/* Flat where you walk, rolling hills further out, and a rise all round the
+   edge of the world so the horizon is a hilltop, not the end of the mesh. */
+function terrainH(x, z) {
+  const d = Math.hypot(x, z);
+  const hills = (fbm(x * 0.011, z * 0.011) - 0.5) * 34 + (fbm(x * 0.05, z * 0.05) - 0.5) * 4;
+  return hills * S(d, 14, 70) + S(d, 180, 430) * 45;
+}
+
+/* The fence runs behind where you arrive; its gate is the way on. */
+function fenceZ(x) { return 12 + 0.004 * x * x; }
+const FIELD_R = 40;
+
+/* ---------- blue sky with a few fair-weather clouds ---------- */
+AFRAME.registerComponent('meadow-sky', {
+  init: function () {
+    this.mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: `
+        varying vec3 vDir;
+        void main() {
+          vDir = (modelMatrix * vec4(position, 1.0)).xyz - cameraPosition;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        uniform float uTime;
+        varying vec3 vDir;
+        float h3(vec3 p) {
+          p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+          p *= 17.0;
+          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+        }
+        float n3(vec3 x) {
+          vec3 i = floor(x), f = fract(x);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+                     mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
+        }
+        float fbm3(vec3 p) {
+          float v = 0.0, a = 0.5;
+          for (int i = 0; i < 5; i++) { v += a * n3(p); p *= 2.03; a *= 0.5; }
+          return v;
+        }
+        void main() {
+          vec3 d = normalize(vDir);
+          float y = max(d.y, 0.0);
+          vec3 col = mix(vec3(0.80, 0.89, 0.95), vec3(0.24, 0.52, 0.88), pow(y, 0.5));
+          vec2 cp = d.xz / (y + 0.1) * 0.9 + vec2(uTime * 0.006, 0.0);
+          float c = fbm3(vec3(cp, 3.1));
+          float cl = smoothstep(0.56, 0.74, c) * smoothstep(0.02, 0.12, y);
+          vec3 cloud = mix(vec3(0.82, 0.86, 0.92), vec3(1.0), smoothstep(0.56, 0.8, fbm3(vec3(cp * 1.6, 7.0))));
+          col = mix(col, cloud, cl * 0.92);
+          vec3 sun = normalize(vec3(0.45, 0.62, 0.3));
+          float s = max(dot(d, sun), 0.0);
+          col += vec3(1.0, 0.95, 0.82) * (pow(s, 700.0) * 2.0 + pow(s, 14.0) * 0.18);
+          gl_FragColor = vec4(min(col, 1.0), 1.0);
+        }`
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(900, 48, 24), this.mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -1;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) {
+    this.mat.uniforms.uTime.value = t / 1000;
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+  }
+});
+
+/* ---------- the rolling meadow ---------- */
+AFRAME.registerComponent('meadow', {
+  init: function () {
+    const geo = new THREE.PlaneGeometry(900, 900, 220, 220);
+    geo.rotateX(-Math.PI / 2);
+    const p = geo.attributes.position, colors = new Float32Array(p.count * 3);
+    const lush = new THREE.Color('#4f9a3a'), pale = new THREE.Color('#9cc95a'),
+          deep = new THREE.Color('#3a7a32'), c = new THREE.Color();
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), z = p.getZ(i), h = terrainH(x, z);
+      p.setY(i, h);
+      c.copy(lush).lerp(pale, S(fbm(x * 0.03 + 9, z * 0.03), 0.4, 0.7) * 0.8);
+      c.lerp(deep, S(fbm(x * 0.12, z * 0.12), 0.55, 0.75) * 0.5);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true }));
+    mesh.receiveShadow = true;
+    this.el.setObject3D('mesh', mesh);
+  }
+});
+
+/* ---------- grass, swaying, with buttercups and daisies in it ---------- */
+function bladeGeometry() {
+  const segs = 4, pos = [], uv = [], idx = [], norm = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, w = 0.05 * (1 - t * 0.88);
+    pos.push(-w, t * 0.55, 0); uv.push(0, t); norm.push(0, 1, 0);
+    pos.push(w, t * 0.55, 0); uv.push(1, t); norm.push(0, 1, 0);
+  }
+  for (let i = 0; i < segs; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  g.setIndex(idx);
+  return g;
+}
+AFRAME.registerComponent('grass-field', {
+  schema: { count: { default: 11000 }, radius: { default: 46 } },
+  init: function () {
+    const rnd = mulberry32(4242), self = this;
+    const mat = new THREE.MeshLambertMaterial({ side: THREE.DoubleSide });
+    mat.onBeforeCompile = function (shader) {
+      shader.uniforms.uTime = { value: 0 };
+      shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         float wx = instanceMatrix[3][0], wz = instanceMatrix[3][2];
+         float sway = sin(uTime * 1.4 + wx * 0.3 + wz * 0.4) * 0.5 + sin(uTime * 2.7 + wx * 0.9) * 0.2;
+         float h = uv.y * uv.y;
+         transformed.x += sway * h * 0.16;
+         transformed.z += sway * h * 0.08;`);
+      self.shader = shader;
+    };
+    mat.customProgramCacheKey = function () { return 'meadow-grass'; };
+    const n = this.data.count, mesh = new THREE.InstancedMesh(bladeGeometry(), mat, n);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    for (let i = 0; i < n; i++) {
+      const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * this.data.radius;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      dummy.position.set(x, terrainH(x, z) - 0.03, z);
+      dummy.rotation.set(0, rnd() * Math.PI, 0);
+      dummy.scale.set(1, 0.6 + rnd() * 0.8, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      mesh.setColorAt(i, col.setHSL(0.25 + rnd() * 0.06, 0.5 + rnd() * 0.2, 0.34 + rnd() * 0.18));
+    }
+    mesh.frustumCulled = false;
+
+    /* The flowers: little upturned discs just above the grass. */
+    const flowers = [], fr = mulberry32(99);
+    for (let p = 0; p < 90; p++) {
+      const a = fr() * Math.PI * 2, r = 4 + Math.sqrt(fr()) * (this.data.radius - 4);
+      const cx = Math.cos(a) * r, cz = Math.sin(a) * r, daisy = fr() < 0.4;
+      for (let i = 0; i < 14; i++) flowers.push({ x: cx + (fr() - 0.5) * 5, z: cz + (fr() - 0.5) * 5, daisy });
+    }
+    const heads = new THREE.InstancedMesh(new THREE.CircleGeometry(0.045, 6).rotateX(-Math.PI / 2),
+      new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), flowers.length);
+    flowers.forEach((f, i) => {
+      dummy.position.set(f.x, terrainH(f.x, f.z) + 0.22 + fr() * 0.2, f.z);
+      dummy.rotation.set((fr() - 0.5) * 0.6, 0, (fr() - 0.5) * 0.6);
+      dummy.scale.setScalar(0.8 + fr() * 0.6);
+      dummy.updateMatrix();
+      heads.setMatrixAt(i, dummy.matrix);
+      heads.setColorAt(i, col.set(f.daisy ? '#fbfbf4' : '#ffd51e'));
+    });
+    const group = new THREE.Group();
+    group.add(mesh, heads);
+    this.el.setObject3D('mesh', group);
+  },
+  tick: function (t) { if (this.shader) this.shader.uniforms.uTime.value = t / 1000; }
+});
+
+/* ---------- lone round trees out on the hills ---------- */
+AFRAME.registerComponent('field-trees', {
+  init: function () {
+    const rnd = mulberry32(606), trees = [];
+    while (trees.length < 30) {
+      const a = rnd() * Math.PI * 2, r = 52 + rnd() * 170;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (trees.some(t => Math.hypot(t.x - x, t.z - z) < 12)) continue;
+      trees.push({ x, z, s: 0.8 + rnd() * 0.7 });
+    }
+    const blobs = [];
+    trees.forEach(t => {
+      const n = 4 + Math.floor(rnd() * 3);
+      for (let i = 0; i < n; i++) blobs.push({ t, dx: (rnd() - 0.5) * 3.2, dy: 5 + rnd() * 2.6, dz: (rnd() - 0.5) * 3.2,
+                                               r: 2 + rnd() * 1.4 });
+    });
+    const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.25, 0.4, 1, 7).translate(0, 0.5, 0),
+      new THREE.MeshLambertMaterial({ color: '#5d4630' }), trees.length);
+    const crowns = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1, 1),
+      new THREE.MeshLambertMaterial({ flatShading: true }), blobs.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    trees.forEach((t, i) => {
+      dummy.position.set(t.x, terrainH(t.x, t.z) - 0.2, t.z);
+      dummy.rotation.set(0, 0, 0);
+      dummy.scale.set(t.s, 6 * t.s, t.s);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+    });
+    blobs.forEach((b, i) => {
+      const t = b.t;
+      dummy.position.set(t.x + b.dx * t.s, terrainH(t.x, t.z) + b.dy * t.s, t.z + b.dz * t.s);
+      dummy.rotation.set(rnd() * 3, rnd() * 3, 0);
+      dummy.scale.setScalar(b.r * t.s);
+      dummy.updateMatrix();
+      crowns.setMatrixAt(i, dummy.matrix);
+      crowns.setColorAt(i, col.setHSL(0.27 + rnd() * 0.05, 0.45, 0.24 + rnd() * 0.1));
+    });
+    trunks.castShadow = crowns.castShadow = true;
+    const group = new THREE.Group();
+    group.add(trunks, crowns);
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- a post-and-rail fence behind you, with a gap for the gate ---------- */
+AFRAME.registerComponent('fence', {
+  init: function () {
+    const posts = [], rails = [], STEP = 2.4;
+    for (let x = -80; x <= 80; x += STEP) {
+      if (Math.abs(x) < 1.6) continue;
+      posts.push({ x, z: fenceZ(x) });
+    }
+    for (let i = 0; i + 1 < posts.length; i++) {
+      const a = posts[i], b = posts[i + 1];
+      if (b.x - a.x > STEP + 0.1) continue;                 /* the gateway */
+      for (const y of [0.55, 1.05]) rails.push({ a, b, y });
+    }
+    const wood = new THREE.MeshLambertMaterial({ color: '#8a6a48' });
+    const postMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(0.15, 1.35, 0.15), wood, posts.length);
+    const railMesh = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 0.11, 0.06), wood, rails.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    posts.forEach((p, i) => {
+      dummy.position.set(p.x, terrainH(p.x, p.z) + 0.6, p.z);
+      dummy.rotation.set(0, Math.sin(i * 7.1) * 0.15, Math.sin(i * 3.3) * 0.03);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      postMesh.setMatrixAt(i, dummy.matrix);
+      postMesh.setColorAt(i, col.setHSL(0.08, 0.3, 0.5 + Math.sin(i * 5.7) * 0.06));
+    });
+    rails.forEach((r, i) => {
+      const ya = terrainH(r.a.x, r.a.z) + r.y, yb = terrainH(r.b.x, r.b.z) + r.y;
+      const dx = r.b.x - r.a.x, dz = r.b.z - r.a.z, len = Math.hypot(dx, dz);
+      dummy.position.set((r.a.x + r.b.x) / 2, (ya + yb) / 2, (r.a.z + r.b.z) / 2);
+      dummy.rotation.set(0, -Math.atan2(dz, dx), Math.atan2(yb - ya, len), 'YXZ');
+      dummy.scale.set(len + 0.1, 1, 1);
+      dummy.updateMatrix();
+      railMesh.setMatrixAt(i, dummy.matrix);
+      railMesh.setColorAt(i, col.setHSL(0.08, 0.28, 0.48 + Math.sin(i * 2.9) * 0.06));
+    });
+    postMesh.castShadow = railMesh.castShadow = true;
+    const group = new THREE.Group();
+    group.add(postMesh, railMesh);
+    this.el.setObject3D('mesh', group);
+  }
+});
+
+/* ---------- the cows ------------------------------------------------------
+   Every cow is the same handful of parts — a patched body, boxes for the
+   head, neck, ears and muzzle, cylinders for legs and tail, little spheres
+   and cones for eyes, udder and horns — so each kind of part is one instanced
+   mesh across the whole herd: five draw calls for every cow in the field.
+   Each cow grazes with its head down in the grass, chewing, now and then
+   lifts it to look around, and sometimes ambles a few steps.             */
+function patchTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 128;
+  const g = c.getContext('2d'), rnd = mulberry32(5);
+  g.fillStyle = '#ffffff'; g.fillRect(0, 0, 256, 128);
+  g.fillStyle = '#1b1a1a';
+  for (let p = 0; p < 9; p++) {
+    const cx = rnd() * 256, cy = 14 + rnd() * 100, size = 12 + rnd() * 20;
+    for (let i = 0; i < 7; i++) {
+      const x = cx + (rnd() - 0.5) * size * 1.6, y = cy + (rnd() - 0.5) * size;
+      for (const ox of [-256, 0, 256]) {           /* wrap round the seam */
+        g.beginPath();
+        g.ellipse(x + ox, y, size * (0.4 + rnd() * 0.5), size * (0.3 + rnd() * 0.4), rnd() * 3, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
+
+const COW_PARTS = (function () {
+  const M = (x, y, z, sx, sy, sz, rx) => new THREE.Matrix4().compose(new THREE.Vector3(x, y, z),
+    new THREE.Quaternion().setFromEuler(new THREE.Euler(rx || 0, 0, 0)), new THREE.Vector3(sx, sy, sz));
+  /* [mesh, attached to, local matrix, colour: 'coat' | 'head' | hex] */
+  return [
+    ['box', 'head', M(0, -0.02, 0.18, 0.3, 0.36, 0.5), 'coat'],         /* neck */
+    ['box', 'head', M(0, 0.0, 0.6, 0.3, 0.34, 0.48), 'head'],           /* head */
+    ['box', 'head', M(0, -0.06, 0.9, 0.28, 0.22, 0.16), '#e9a9a0'],     /* muzzle */
+    ['box', 'head', M(0.21, 0.1, 0.47, 0.18, 0.04, 0.1), 'head'],       /* ears */
+    ['box', 'head', M(-0.21, 0.1, 0.47, 0.18, 0.04, 0.1), 'head'],
+    ['cone', 'head', M(0.1, 0.22, 0.46, 0.035, 0.12, 0.035), '#efe6cf'], /* horns */
+    ['cone', 'head', M(-0.1, 0.22, 0.46, 0.035, 0.12, 0.035), '#efe6cf'],
+    ['sphere', 'head', M(0.155, 0.06, 0.7, 0.035, 0.035, 0.035), '#111111'],  /* eyes */
+    ['sphere', 'head', M(-0.155, 0.06, 0.7, 0.035, 0.035, 0.035), '#111111'],
+    ['sphere', 'body', M(0, 0.66, -0.3, 0.16, 0.12, 0.2), '#efb3aa'],   /* udder */
+    ['cyl', 'leg0', M(0, 0, 0, 1, 1, 1), 'coat'],
+    ['cyl', 'leg1', M(0, 0, 0, 1, 1, 1), 'coat'],
+    ['cyl', 'leg2', M(0, 0, 0, 1, 1, 1), 'coat'],
+    ['cyl', 'leg3', M(0, 0, 0, 1, 1, 1), 'coat'],
+    ['cyl', 'tail', M(0, 0, 0, 0.28, 0.85, 0.28), 'coat'],
+    ['sphere', 'tail', M(0, -0.7, 0, 0.06, 0.12, 0.06), '#2a2522']   /* tail tuft */
+  ];
+})();
+const HIPS = [[0.24, 0.86, 0.55], [-0.24, 0.86, 0.55], [0.24, 0.86, -0.55], [-0.24, 0.86, -0.55]];
+
+AFRAME.registerComponent('herd', {
+  schema: { count: { default: 14 } },
+  init: function () {
+    const rnd = this.rnd = mulberry32(1234), cows = this.cows = [];
+    while (cows.length < this.data.count) {
+      const a = rnd() * Math.PI * 2, r = 9 + rnd() * 28;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r - 6;
+      if (z > fenceZ(x) - 4 || Math.hypot(x, z - 8) < 7) continue;
+      if (cows.some(c => Math.hypot(c.x - x, c.z - z) < 3.5)) continue;
+      const brown = rnd() < 0.3;
+      cows.push({
+        x, z, yaw: rnd() * Math.PI * 2,
+        coat: new THREE.Color(brown ? '#b0784a' : '#ffffff'),
+        head: new THREE.Color(rnd() < 0.5 ? '#1e1c1b' : (brown ? '#b0784a' : '#f4f2ee')),
+        roll: rnd() * Math.PI * 2, size: 0.92 + rnd() * 0.16,
+        state: 'graze', timer: 2 + rnd() * 8, pitch: 1.2, yawH: 0, tPitch: 1.3, tYaw: 0,
+        walk: 0, phase: rnd() * 10
+      });
+    }
+    const n = cows.length, count = { box: 0, cone: 0, sphere: 0, cyl: 0 };
+    COW_PARTS.forEach(p => count[p[0]] += n);
+    const lam = () => new THREE.MeshLambertMaterial();
+    this.meshes = {
+      body: new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.42, 1.1, 6, 14).rotateX(Math.PI / 2),
+        new THREE.MeshLambertMaterial({ map: patchTexture() }), n),
+      box: new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), lam(), count.box),
+      cone: new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 6), lam(), count.cone),
+      sphere: new THREE.InstancedMesh(new THREE.SphereGeometry(1, 10, 8), lam(), count.sphere),
+      /* Legs and tail pivot at their top end. */
+      cyl: new THREE.InstancedMesh(new THREE.CylinderGeometry(0.085, 0.07, 0.82, 7).translate(0, -0.41, 0), lam(), count.cyl)
+    };
+    const group = new THREE.Group(), col = new THREE.Color();
+    for (const k in this.meshes) {
+      const m = this.meshes[k];
+      m.castShadow = true; m.frustumCulled = false;
+      group.add(m);
+    }
+    cows.forEach((c, i) => this.meshes.body.setColorAt(i, c.coat));
+    const idx = { box: 0, cone: 0, sphere: 0, cyl: 0 };
+    this.slots = [];
+    cows.forEach(c => {
+      const slots = [];
+      COW_PARTS.forEach(p => {
+        const k = p[0], at = idx[k]++;
+        this.meshes[k].setColorAt(at, p[3] === 'coat' ? c.coat : p[3] === 'head' ? c.head : col.set(p[3]));
+        slots.push(at);
+      });
+      this.slots.push(slots);
+    });
+    this.m = { base: new THREE.Matrix4(), head: new THREE.Matrix4(), tmp: new THREE.Matrix4(),
+               legs: [0, 1, 2, 3].map(() => new THREE.Matrix4()), tail: new THREE.Matrix4(),
+               body: new THREE.Matrix4() };
+    this.q = new THREE.Quaternion(); this.e = new THREE.Euler(); this.v = new THREE.Vector3(); this.sv = new THREE.Vector3(); this.one = new THREE.Vector3(1, 1, 1);
+    this.el.setObject3D('mesh', group);
+  },
+
+  think: function (c) {
+    const rnd = this.rnd;
+    const r = rnd();
+    if (r < 0.55) { c.state = 'graze'; c.timer = 5 + rnd() * 9; c.tPitch = 1.3; c.tYaw = (rnd() - 0.5) * 0.4; }
+    else if (r < 0.8) { c.state = 'look'; c.timer = 2 + rnd() * 4; c.tPitch = 0.1 + rnd() * 0.25; c.tYaw = (rnd() - 0.5) * 1.2; }
+    else {
+      c.state = 'walk'; c.timer = 2 + rnd() * 4; c.tPitch = 0.45; c.tYaw = 0;
+      /* Amble towards somewhere else in the field, never through the fence or onto you. */
+      const a = rnd() * Math.PI * 2, r2 = 10 + rnd() * 24;
+      const tx = Math.cos(a) * r2, tz = Math.sin(a) * r2 - 8;
+      c.targetYaw = Math.atan2(tx - c.x, tz - c.z);
+    }
+  },
+
+  tick: function (t, dt) {
+    if (!this.cows || !dt) return;
+    dt = Math.min(dt, 100) / 1000;
+    const time = t / 1000, M = this.m, q = this.q, e = this.e, v = this.v, one = this.one;
+    this.cows.forEach((c, i) => {
+      c.timer -= dt;
+      if (c.timer <= 0) this.think(c);
+      if (c.state === 'walk') {
+        let dy = c.targetYaw - c.yaw;
+        dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+        c.yaw += THREE.MathUtils.clamp(dy, -0.5 * dt, 0.5 * dt);
+        const nx = c.x + Math.sin(c.yaw) * 0.45 * dt, nz = c.z + Math.cos(c.yaw) * 0.45 * dt;
+        const blocked = nz > fenceZ(nx) - 3 || Math.hypot(nx, nz) > FIELD_R - 2 ||
+                        this.cows.some(o => o !== c && Math.hypot(o.x - nx, o.z - nz) < 2.6);
+        if (!blocked) { c.x = nx; c.z = nz; c.walk += dt * 4.2; }
+        else c.timer = Math.min(c.timer, 0.2);
+      }
+      const ease = 1 - Math.exp(-dt * 1.6);
+      c.pitch += (c.tPitch - c.pitch) * ease;
+      c.yawH += (c.tYaw - c.yawH) * ease;
+      /* Chewing: little nods while the head is down. */
+      const chew = c.state === 'graze' ? Math.sin(time * 3.2 + c.phase) * 0.05 : 0;
+
+      M.base.compose(v.set(c.x, terrainH(c.x, c.z), c.z), q.setFromEuler(e.set(0, c.yaw, 0)), this.sv.setScalar(c.size));
+      M.body.compose(v.set(0, 1.05, 0), q.setFromEuler(e.set(0, 0, c.roll)), one).premultiply(M.base);
+      M.head.compose(v.set(0, 1.18, 0.78), q.setFromEuler(e.set(c.pitch + chew, c.yawH, 0, 'YXZ')), one).premultiply(M.base);
+      const step = c.state === 'walk' ? Math.sin(c.walk) * 0.35 : 0;
+      HIPS.forEach((h, k) => {
+        const swing = (k === 0 || k === 3) ? step : -step;
+        M.legs[k].compose(v.set(h[0], h[1], h[2]), q.setFromEuler(e.set(swing, 0, 0)), one).premultiply(M.base);
+      });
+      M.tail.compose(v.set(0, 1.32, -0.9),
+        q.setFromEuler(e.set(0.18, 0, Math.sin(time * 1.9 + c.phase) * 0.28 * (0.5 + 0.5 * Math.sin(time * 0.3 + c.phase)))),
+        one).premultiply(M.base);
+
+      this.meshes.body.setMatrixAt(i, M.body);
+      COW_PARTS.forEach((p, k) => {
+        const att = p[1], parent = att === 'head' ? M.head : att === 'body' ? M.base :
+                    att === 'tail' ? M.tail : M.legs[+att.slice(3)];
+        M.tmp.multiplyMatrices(parent, p[2]);
+        this.meshes[p[0]].setMatrixAt(this.slots[i][k], M.tmp);
+      });
+    });
+    for (const k in this.meshes) this.meshes[k].instanceMatrix.needsUpdate = true;
+  }
+});
+
+/* ---------- hot air balloons ----------------------------------------------
+   One lathed envelope shape shared by every balloon, each in its own
+   pattern, drifting on the same slow wind and rising and sinking a little. */
+const PALETTES = [
+  ['#e63946', '#f8f4ec'], ['#ffb703', '#fb8500', '#1d3557'], ['#2a9d8f', '#e9c46a', '#f4a261', '#e76f51'],
+  ['#7b2cbf', '#ffd60a'], ['#ef476f', '#ffd166', '#06d6a0', '#118ab2'], ['#d62828', '#fcbf49', '#003049'],
+  ['#ffffff', '#1d4ed8'], ['#f72585', '#4cc9f0', '#ffffff'], ['#ff7b00', '#ffffff', '#38b000'],
+  ['#14213d', '#fca311', '#e5e5e5']
+];
+function balloonTexture(pattern, pal, rnd) {
+  const W = 512, H = 256, c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d'), GORES = 24, gw = W / GORES;
+  const at = i => pal[((i % pal.length) + pal.length) % pal.length];
+  if (pattern === 0) {                       /* plain gores, alternating */
+    for (let k = 0; k < GORES; k++) { g.fillStyle = at(k); g.fillRect(k * gw, 0, gw + 1, H); }
+  } else if (pattern === 1) {                /* gores with a contrasting crown and belt */
+    for (let k = 0; k < GORES; k++) { g.fillStyle = at(k); g.fillRect(k * gw, 0, gw + 1, H); }
+    g.fillStyle = at(pal.length - 1); g.fillRect(0, 0, W, H * 0.16);
+    g.fillStyle = at(1); g.fillRect(0, H * 0.5, W, H * 0.07);
+  } else if (pattern === 2) {                /* horizontal bands with zigzag edges */
+    const bands = 6;
+    for (let b = bands - 1; b >= 0; b--) {
+      g.fillStyle = at(b);
+      g.beginPath(); g.moveTo(0, H);
+      for (let k = 0; k <= GORES * 2; k++) g.lineTo(k * gw / 2, H * b / bands + (k % 2 ? 10 : -10));
+      g.lineTo(W, H); g.closePath(); g.fill();
+    }
+  } else if (pattern === 3) {                /* spiral stripes */
+    for (let k = -GORES; k < GORES * 2; k++) {
+      g.fillStyle = at(k);
+      g.beginPath(); g.moveTo(k * gw, H); g.lineTo((k + 1) * gw, H);
+      g.lineTo((k + 1) * gw + W * 0.5, 0); g.lineTo(k * gw + W * 0.5, 0); g.closePath(); g.fill();
+    }
+  } else {                                   /* one colour, with a band of diamonds round the middle */
+    g.fillStyle = at(0); g.fillRect(0, 0, W, H);
+    g.fillStyle = at(1);
+    for (let k = 0; k < GORES; k++) {
+      g.beginPath(); const x = k * gw + gw / 2;
+      g.moveTo(x, H * 0.36); g.lineTo(x + gw / 2, H * 0.48); g.lineTo(x, H * 0.6); g.lineTo(x - gw / 2, H * 0.48);
+      g.closePath(); g.fill();
+    }
+    g.fillStyle = at(2); g.fillRect(0, 0, W, H * 0.08); g.fillRect(0, H * 0.88, W, H * 0.12);
+  }
+  /* The seams between the gores. */
+  g.strokeStyle = 'rgba(0,0,0,.18)'; g.lineWidth = 1.5;
+  for (let k = 0; k < GORES; k++) { g.beginPath(); g.moveTo(k * gw, 0); g.lineTo(k * gw, H); g.stroke(); }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
+}
+function envelopeGeometry() {
+  const pts = new THREE.SplineCurve([
+    new THREE.Vector2(1.2, 0), new THREE.Vector2(2.6, 1.6), new THREE.Vector2(4.4, 4.2),
+    new THREE.Vector2(5.8, 7.2), new THREE.Vector2(6.3, 9.8), new THREE.Vector2(6.0, 12.3),
+    new THREE.Vector2(4.9, 14.4), new THREE.Vector2(2.9, 15.8), new THREE.Vector2(0.0, 16.3)
+  ]).getPoints(30);
+  pts[pts.length - 1].x = 0;
+  return new THREE.LatheGeometry(pts, 48);
+}
+function buildBalloon(mat, parts) {
+  const g = new THREE.Group();
+  const env = new THREE.Mesh(parts.envelope, mat);
+  g.add(env);
+  const basket = new THREE.Mesh(parts.basket, parts.wicker);
+  basket.position.y = -3.1;
+  basket.castShadow = true;
+  g.add(basket, new THREE.LineSegments(parts.ropes, parts.rope));
+  const burner = new THREE.Mesh(parts.burner, parts.metal);
+  burner.position.y = -1.7;
+  const flame = new THREE.Mesh(parts.flame, parts.fire);
+  flame.position.y = -1.0;
+  flame.visible = false;
+  g.add(burner, flame);
+  g.userData.flame = flame;
+  return g;
+}
+
+AFRAME.registerComponent('balloons', {
+  schema: { count: { default: 48 } },
+  init: function () {
+    const rnd = mulberry32(31), group = new THREE.Group();
+    const ropePts = [];
+    for (let k = 0; k < 4; k++) {
+      const a = k / 4 * Math.PI * 2 + Math.PI / 4;
+      ropePts.push(Math.cos(a) * 1.15, 0, Math.sin(a) * 1.15, Math.cos(a) * 0.62, -2.6, Math.sin(a) * 0.62);
+    }
+    const parts = {
+      envelope: envelopeGeometry(),
+      basket: new THREE.BoxGeometry(1.3, 1.0, 1.3),
+      burner: new THREE.BoxGeometry(0.5, 0.3, 0.5),
+      flame: new THREE.ConeGeometry(0.28, 1.3, 8),
+      ropes: new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(ropePts, 3)),
+      wicker: new THREE.MeshLambertMaterial({ color: '#9b7447' }),
+      metal: new THREE.MeshLambertMaterial({ color: '#444a50' }),
+      rope: new THREE.LineBasicMaterial({ color: '#3a3228' }),
+      fire: new THREE.MeshBasicMaterial({ color: '#ffb347', transparent: true, opacity: 0.9 })
+    };
+    const mats = [];
+    for (let i = 0; i < 12; i++) {
+      mats.push(new THREE.MeshLambertMaterial({
+        map: balloonTexture(i % 5, PALETTES[(i * 7) % PALETTES.length], rnd), side: THREE.DoubleSide }));
+    }
+    this.list = [];
+    let tries = 0;
+    while (this.list.length < this.data.count && tries++ < 2000) {
+      /* Spread by how high they stand in the sky, not by altitude, so the
+         whole sky fills up rather than a band along the horizon. */
+      const a = rnd() * Math.PI * 2, r = 50 + Math.pow(rnd(), 1.3) * 300;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      const y = Math.max(terrainH(x, z) + 25, 1.6 + r * Math.tan(THREE.MathUtils.degToRad(7 + rnd() * 38)));
+      if (this.list.some(b => Math.hypot(b.x - x, b.z - z, b.y - y) < 26)) continue;
+      const g = buildBalloon(mats[this.list.length % mats.length], parts);
+      g.scale.setScalar(0.85 + rnd() * 0.35);
+      group.add(g);
+      this.list.push({ g, x, y, z, ph: rnd() * 10, speed: 0.8 + rnd() * 0.9, spin: (rnd() - 0.5) * 0.04,
+                       burn: rnd() * 12 });
+    }
+    /* One still on its tether in the field, getting ready to go up. */
+    const tx = 20, tz = -26;
+    const tg = buildBalloon(mats[3], parts);
+    group.add(tg);
+    const stakes = [];
+    for (let k = 0; k < 4; k++) {
+      const a = k / 4 * Math.PI * 2 + Math.PI / 4;
+      stakes.push(Math.cos(a) * 0.62, -3.5, Math.sin(a) * 0.62, Math.cos(a) * 3, -4.2, Math.sin(a) * 3);
+    }
+    tg.add(new THREE.LineSegments(new THREE.BufferGeometry().setAttribute('position',
+      new THREE.Float32BufferAttribute(stakes, 3)), parts.rope));
+    this.tether = { g: tg, x: tx, z: tz, y: terrainH(tx, tz) + 3.62, burn: 2 };
+    this.light = new THREE.PointLight('#ffb050', 0, 18, 2);
+    tg.add(this.light);
+    this.light.position.y = 0.5;
+    this.el.setObject3D('mesh', group);
+  },
+  tick: function (t, dt) {
+    if (!this.list || !dt) return;
+    dt = Math.min(dt, 100) / 1000;
+    const time = t / 1000;
+    for (const b of this.list) {
+      b.x += b.speed * dt;
+      /* Blown off one side of the world, back in on the other. */
+      if (b.x > 380) b.x -= 760;
+      b.g.position.set(b.x, b.y + Math.sin(time * 0.17 + b.ph) * 2.2, b.z);
+      b.g.rotation.y += b.spin * dt;
+      /* A short blast on the burner every so often. */
+      b.burn -= dt;
+      if (b.burn < 0) b.burn = 8 + (b.ph * 7.3) % 10;
+      b.g.userData.flame.visible = b.burn < 1.2;
+    }
+    const tb = this.tether;
+    tb.burn -= dt;
+    if (tb.burn < 0) tb.burn = 6;
+    const on = tb.burn < 1.6, flick = on ? 0.75 + 0.25 * Math.sin(time * 40) : 0;
+    tb.g.userData.flame.visible = on;
+    tb.g.userData.flame.scale.set(1, 0.8 + flick * 0.4, 1);
+    this.light.intensity = flick * 3;
+    tb.g.position.set(tb.x, tb.y + Math.sin(time * 0.6) * 0.06, tb.z);
+  }
+});
+
+/* ---------- keep the walker in the field, this side of the fence ---------- */
+AFRAME.registerComponent('field-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    const d = Math.hypot(p.x, p.z);
+    if (d > FIELD_R) { p.x *= FIELD_R / d; p.z *= FIELD_R / d; }
+    p.z = Math.min(p.z, fenceZ(p.x) - 1.4);
+    p.y = terrainH(p.x, p.z) + this.data.height;
+  }
+});
+
+/* ---------- put a markup landmark on the ground ---------- */
+AFRAME.registerComponent('on-ground', {
+  init: function () {
+    const p = AFRAME.utils.coordinates.parse(this.el.getDOMAttribute('position') || '0 0 0');
+    this.el.setAttribute('position', { x: p.x, y: terrainH(p.x, p.z), z: p.z });
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Balloon Meadow</b><br>WASD / arrows to walk &middot; drag to look &middot; the cows don't mind</div>
+
+<a-scene fog="type: exponential; color: #cfe2ee; density: 0.0028"
+         shadow="type: pcfsoft"
+         renderer="colorManagement: true; antialias: true">
+
+  <a-entity meadow-sky></a-entity>
+  <a-entity meadow></a-entity>
+  <a-entity grass-field></a-entity>
+  <a-entity field-trees></a-entity>
+  <a-entity fence></a-entity>
+  <a-entity herd></a-entity>
+  <a-entity balloons></a-entity>
+
+  <a-entity light="type: hemisphere; color: #d6ebff; groundColor: #6f9a4c; intensity: 0.85"></a-entity>
+  <a-entity position="45 62 30"
+    light="type: directional; color: #fff4dc; intensity: 1.15; castShadow: true;
+           shadowMapWidth: 2048; shadowMapHeight: 2048;
+           shadowCameraLeft: -45; shadowCameraRight: 45;
+           shadowCameraTop: 45; shadowCameraBottom: -45;
+           shadowCameraFar: 220; shadowBias: -0.0012"></a-entity>
+
+  <a-entity id="rig" position="0 1.6 7" field-walk
+            wasd-controls="acceleration: 42" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="1300" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Onward: the gate in the fence behind you. Beyond it the weather turns. -->
+  <a-entity position="0 0 12" rotation="0 180 0" on-ground>
+    <a-box position="-1.25 1.45 0" width="0.22" height="2.9" depth="0.22"
+           material="color: #7a5c3e; roughness: 1" shadow="cast: true"></a-box>
+    <a-box position="1.25 1.45 0" width="0.22" height="2.9" depth="0.22"
+           material="color: #7a5c3e; roughness: 1" shadow="cast: true"></a-box>
+    <a-box position="0 2.95 0" width="2.9" height="0.2" depth="0.24"
+           material="color: #84644a; roughness: 1" shadow="cast: true"></a-box>
+    <a-plane class="portal" position="0 1.4 0" width="2.3" height="2.8"
+             material="shader: flat; side: double"
+             portal="href: next; color: #8d9cab; hover: #cfdbe6"></a-plane>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

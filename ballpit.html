@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Ball Pit Sky</title>
 <script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/routes.js"></script>
 <script src="js/portal.js"></script>
 <script src="js/ambience.js"></script>
 <style>
@@ -285,7 +286,7 @@ AFRAME.registerComponent('pit-walk', {
   }
 });
 
-/* ---------- a round doorway ringed with balls: the way back ---------- */
+/* ---------- a round doorway ringed with balls: the way home ---------- */
 AFRAME.registerComponent('ball-ring', {
   schema: { radius: {default: 1.75}, count: {default: 18}, ball: {default: 0.26}, seed: {default: 3} },
   init: function () {
@@ -344,13 +345,14 @@ AFRAME.registerComponent('ball-ring', {
     </a-camera>
   </a-entity>
 
-  <!-- Way back to the jungle: turn around from the starting spot. -->
+  <!-- The end of the garden branch, for now: a way home to the hub, behind
+       where you arrive. Where it leads is set in js/routes.js. -->
   <a-entity position="0 0 10.6" rotation="0 180 0">
     <a-entity position="0 2.1 0" ball-ring></a-entity>
     <a-circle class="portal" position="0 2.1 0" radius="1.5"
               material="shader: flat; side: double"
-              portal="href: jungle.html; color: #8fd3ff; hover: #e2f5ff"></a-circle>
-    <a-text value="Back to the jungle" align="center" width="4" color="#ffffff"
+              portal="href: next; color: #8fd3ff; hover: #e2f5ff"></a-circle>
+    <a-text value="Back to the hub" align="center" width="4" color="#ffffff"
             position="0 4.3 0.1"></a-text>
   </a-entity>
   <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>

@@ -11,18 +11,31 @@ no going back and no returning to the hub mid-branch.
 Each branch is a *sequence* of worlds, not one room. Every world has exactly one
 onward doorway, and the branch terminates in an endpoint.
 
-### Worked example — the jungle branch
+### The jungle branch — built
 
 ```
-hub → boat sailing on the open sea
-    → underwater, among fish and sharks
-    → a beach with palm trees
-    → the jungle
-    → (endpoint)
+hub → jungle
+    → Rainbow Bay      a small sand beach; a rainbow over mountains across the
+                       bay, rainbow and mountains both mirrored in the water
+    → Balloon Meadow   green field, blue sky full of hot air balloons, cows grazing
+    → Storm Forest     pines in the rain, thunder and lightning now and then
+    → Starry Night     dark grass field full of flowers, a sky full of
+                       flickering stars, mountains all round
+    → (back to the hub, for now)
 ```
 
-The branches for snow, the garden and the cave are still open. Each needs the
-same shape: a run of connected scenes ending somewhere final.
+This replaced an earlier sketch (boat at sea → underwater → palm beach →
+jungle). The ball pit used to hang off the jungle; it is now the first step of
+the garden branch instead.
+
+### The garden branch — started
+
+```
+hub → Japanese garden → Ball Pit Sky → (back to the hub, for now)
+```
+
+The branches for snow and the cave are still open. Each needs the same shape:
+a run of connected scenes ending somewhere final.
 
 ### What this changes
 
@@ -32,18 +45,14 @@ same shape: a run of connected scenes ending somewhere final.
 - **Back-doors become branch-forward doors.** Every world currently has a "Back to
   the hub" portal. Under the maze these become one-way links to the *next* scene
   in the branch. The hub link only makes sense from an endpoint, if at all.
-- **Scenes need an order.** Right now `jungle.html`, `cave.html`, `snow.html` and
-  `japanese-garden.html` are siblings hanging off the hub. They will become nodes
-  in four chains, so something has to own the routing — probably a small table in
-  JS rather than hardcoded `href`s scattered through the markup.
+- **Scenes have an order, kept in one table.** `js/routes.js` maps each page to
+  the page its onward door leads to; doors say `portal="href: next"` instead of a
+  hardcoded `href`. Reordering a branch is a one-line change there. Snow and the
+  cave still link straight to the hub until their branches exist.
 - **Endpoints need to be designed.** An ending that is just a dead end will feel
-  like a bug. Open question: does the branch end in a reveal, a view, a return?
-
-### Scenes the jungle branch still needs
-
-- a boat on open sea (moving deck, horizon, sail)
-- underwater (caustics, fish schools, sharks, surface seen from below)
-- a palm beach (sand, surf line, palms)
+  like a bug. For now Starry Night and Ball Pit Sky end in a labelled door back
+  to the hub. Open question: does the branch end in a reveal, a view, a return?
+- **Onward doors are unlabelled; only the way home says where it goes.**
 
 ## Done, and why
 
@@ -62,7 +71,8 @@ same shape: a run of connected scenes ending somewhere final.
 - **Each world has looping ambience** via `js/ambience.js` (`ambience` component
   on `a-scene`), with a mute button top-right. Browsers block autoplay until the
   page is interacted with, so it retries on the first click or keypress. The
-  garden and cave have no audio yet.
+  cave and the four jungle-branch worlds have no audio yet — Storm Forest in
+  particular wants rain and thunder.
 
 ## Backlog
 

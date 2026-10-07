@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Storm Forest</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/cosmos.js"></script>
+<script src="js/routes.js"></script>
+<script src="js/portal.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(16,20,26,.7); color: #d8e0e8; padding: 10px 14px;
+    border: 1px solid rgba(170,190,210,.25); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #f0f4f8; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+const S = THREE.MathUtils.smoothstep;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- value noise / fbm ---------- */
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+
+/* A clearing in a pine forest: level where you stand, gently uneven under the
+   trees, rising at the edge so the forest floor never just stops. */
+function terrainH(x, z) {
+  const d = Math.hypot(x, z);
+  return (fbm(x * 0.03, z * 0.03) - 0.5) * 4 * S(d, 7, 30) + S(d, 45, 130) * 12;
+}
+const WALK_R = 22;
+/* Rainwater lying in the dips of the clearing. [x, z, size] */
+const PUDDLES = [[-3.2, -2.4, 1.7], [4.1, -5.2, 1.2], [-5.8, 2.8, 1.0], [2.4, 1.2, 0.8],
+                 [-0.8, -8.8, 1.5], [6.6, 1.9, 1.1], [-7.2, -6.4, 1.3]];
+
+/* ---------- the storm's state, shared by everything it lights ---------- */
+const storm = { flash: 0, dir: new THREE.Vector3(0, 0.3, -1).normalize() };
+
+/* ---------- churning storm clouds, lit from inside by the lightning ---------- */
+AFRAME.registerComponent('storm-sky', {
+  init: function () {
+    this.mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: { uTime: { value: 0 }, uFlash: { value: 0 }, uFlashDir: { value: storm.dir } },
+      vertexShader: `
+        varying vec3 vDir;
+        void main() {
+          vDir = (modelMatrix * vec4(position, 1.0)).xyz - cameraPosition;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        uniform float uTime, uFlash;
+        uniform vec3 uFlashDir;
+        varying vec3 vDir;
+        float h3(vec3 p) {
+          p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+          p *= 17.0;
+          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+        }
+        float n3(vec3 x) {
+          vec3 i = floor(x), f = fract(x);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+                     mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
+        }
+        float fbm3(vec3 p) {
+          float v = 0.0, a = 0.5;
+          for (int i = 0; i < 5; i++) { v += a * n3(p); p *= 2.03; a *= 0.5; }
+          return v;
+        }
+        void main() {
+          vec3 d = normalize(vDir);
+          float y = max(d.y, 0.0);
+          vec3 col = mix(vec3(0.21, 0.24, 0.27), vec3(0.10, 0.12, 0.15), pow(y, 0.6));
+          vec2 cp = d.xz / (y + 0.15) * 1.1 + vec2(uTime * 0.03, uTime * 0.012);
+          float c = fbm3(vec3(cp, uTime * 0.02));
+          col *= 0.65 + c * 0.75;
+          float near = pow(max(dot(d, uFlashDir), 0.0), 4.0);
+          col += uFlash * (0.3 + 1.1 * near) * vec3(0.72, 0.78, 0.95) * (0.35 + c);
+          gl_FragColor = vec4(min(col, 1.0), 1.0);
+        }`
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(500, 40, 20), this.mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -1;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function (t) {
+    this.mat.uniforms.uTime.value = t / 1000;
+    this.mat.uniforms.uFlash.value = storm.flash;
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+  }
+});
+
+/* ---------- the forest floor ---------- */
+AFRAME.registerComponent('forest-floor', {
+  init: function () {
+    const geo = new THREE.PlaneGeometry(300, 300, 150, 150);
+    geo.rotateX(-Math.PI / 2);
+    const p = geo.attributes.position, colors = new Float32Array(p.count * 3);
+    const moss = new THREE.Color('#2c3a24'), mud = new THREE.Color('#2e2820'),
+          needles = new THREE.Color('#3b2f22'), c = new THREE.Color();
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), z = p.getZ(i);
+      p.setY(i, terrainH(x, z));
+      c.copy(moss).lerp(needles, S(fbm(x * 0.15, z * 0.15), 0.4, 0.7));
+      c.lerp(mud, S(fbm(x * 0.4 + 3, z * 0.4), 0.55, 0.75) * 0.7);
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    this.el.setObject3D('mesh', new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true })));
+  }
+});
+
+/* ---------- swaying in the wind: shared by the trees and the grass ---------- */
+/* Bends a mesh over by world height, in gusts. `reach` is the height at which
+   the sway reaches `amount` metres; it grows with the square of the height. */
+function windSway(mat, key, amount, reach) {
+  mat.onBeforeCompile = function (shader) {
+    shader.uniforms.uTime = { value: 0 };
+    shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <project_vertex>', `
+      vec4 wp = vec4(transformed, 1.0);
+      #ifdef USE_INSTANCING
+        wp = instanceMatrix * wp;
+      #endif
+      wp = modelMatrix * wp;
+      float hh = max(wp.y, 0.0) / ${reach.toFixed(1)};
+      float gust = 0.55 + 0.45 * sin(uTime * 0.45 + wp.x * 0.02);
+      float sway = (sin(uTime * 1.7 + wp.x * 0.21 + wp.z * 0.13) * 0.6
+                  + sin(uTime * 3.1 + wp.z * 0.37) * 0.25 + 0.9) * gust;
+      wp.x += sway * hh * hh * ${amount.toFixed(2)};
+      wp.z += sway * hh * hh * ${(amount * 0.4).toFixed(2)};
+      vec4 mvPosition = viewMatrix * wp;
+      gl_Position = projectionMatrix * mvPosition;`);
+    mat.userData.shader = shader;
+  };
+  mat.customProgramCacheKey = function () { return key; };
+  return mat;
+}
+
+/* ---------- the pines ---------- */
+AFRAME.registerComponent('pines', {
+  schema: { count: { default: 260 } },
+  init: function () {
+    const rnd = mulberry32(4711), trees = [];
+    let tries = 0;
+    while (trees.length < this.data.count && tries++ < 8000) {
+      const a = rnd() * Math.PI * 2, r = 7 + Math.pow(rnd(), 0.7) * 55;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (Math.hypot(x, z - 6) < 5.5) continue;                       /* where you arrive */
+      if (Math.abs(x) < 5.5 && z > 7 && z < 16) continue;             /* the arch behind you */
+      if (PUDDLES.some(p => Math.hypot(x - p[0], z - p[1]) < p[2] + 1.2)) continue;
+      if (trees.some(t => Math.hypot(t.x - x, t.z - z) < 2.6)) continue;
+      trees.push({ x, z, h: 9 + rnd() * 10, lean: (rnd() - 0.5) * 0.06 });
+    }
+    const tiers = [];
+    trees.forEach(t => {
+      const n = 5 + Math.floor(rnd() * 3), base = t.h * 0.28;
+      for (let i = 0; i < n; i++) {
+        const f = i / (n - 1);
+        tiers.push({ t, y: base + f * (t.h - base) * 0.88, r: (1 - f * 0.78) * t.h * 0.24,
+                     hgt: t.h * (0.32 - f * 0.12), spin: rnd() * 6 });
+      }
+    });
+    const bark = windSway(new THREE.MeshLambertMaterial({ color: '#3a2c22' }), 'pine-bark', 0.5, 18);
+    const needles = windSway(new THREE.MeshLambertMaterial({ flatShading: true }), 'pine-needles', 0.5, 18);
+    const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.16, 0.34, 1, 7).translate(0, 0.5, 0), bark, trees.length);
+    const crowns = new THREE.InstancedMesh(new THREE.ConeGeometry(1, 1, 8).translate(0, 0.5, 0), needles, tiers.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    trees.forEach((t, i) => {
+      dummy.position.set(t.x, terrainH(t.x, t.z) - 0.2, t.z);
+      dummy.rotation.set(t.lean, 0, t.lean);
+      dummy.scale.set(t.h / 14, t.h * 0.9, t.h / 14);
+      dummy.updateMatrix();
+      trunks.setMatrixAt(i, dummy.matrix);
+    });
+    tiers.forEach((k, i) => {
+      dummy.position.set(k.t.x, terrainH(k.t.x, k.t.z) + k.y, k.t.z);
+      dummy.rotation.set(0, k.spin, 0);
+      dummy.scale.set(k.r, k.hgt, k.r);
+      dummy.updateMatrix();
+      crowns.setMatrixAt(i, dummy.matrix);
+      crowns.setColorAt(i, col.setHSL(0.36 + rnd() * 0.06, 0.28 + rnd() * 0.12, 0.13 + rnd() * 0.07));
+    });
+    trunks.frustumCulled = crowns.frustumCulled = false;
+    this.mats = [bark, needles];
+    const group = new THREE.Group();
+    group.add(trunks, crowns);
+    this.el.setObject3D('mesh', group);
+  },
+  tick: function (t) {
+    for (const m of this.mats) if (m.userData.shader) m.userData.shader.uniforms.uTime.value = t / 1000;
+  }
+});
+
+/* ---------- wet grass and a fallen trunk in the clearing ---------- */
+function bladeGeometry() {
+  const segs = 3, pos = [], uv = [], idx = [], norm = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, w = 0.05 * (1 - t * 0.85);
+    pos.push(-w, t * 0.5, 0); uv.push(0, t); norm.push(0, 1, 0);
+    pos.push(w, t * 0.5, 0); uv.push(1, t); norm.push(0, 1, 0);
+  }
+  for (let i = 0; i < segs; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  g.setIndex(idx);
+  return g;
+}
+AFRAME.registerComponent('undergrowth', {
+  schema: { count: { default: 6000 } },
+  init: function () {
+    const rnd = mulberry32(17), list = [];
+    while (list.length < this.data.count) {
+      const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * 30;
+      const x = Math.cos(a) * r, z = Math.sin(a) * r;
+      if (PUDDLES.some(p => Math.hypot(x - p[0], z - p[1]) < p[2] + 0.15)) continue;
+      list.push([x, z]);
+    }
+    this.mat = windSway(new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), 'storm-grass', 0.12, 0.6);
+    const mesh = new THREE.InstancedMesh(bladeGeometry(), this.mat, list.length);
+    const dummy = new THREE.Object3D(), col = new THREE.Color();
+    list.forEach(([x, z], i) => {
+      dummy.position.set(x, terrainH(x, z) - 0.03, z);
+      dummy.rotation.set((rnd() - 0.5) * 0.4, rnd() * Math.PI, 0);
+      dummy.scale.set(1, 0.5 + rnd() * 1.1, 1);
+      dummy.updateMatrix();
+      mesh.setMatrixAt(i, dummy.matrix);
+      mesh.setColorAt(i, col.setHSL(0.24 + rnd() * 0.08, 0.3 + rnd() * 0.15, 0.16 + rnd() * 0.12));
+    });
+    mesh.frustumCulled = false;
+    const group = new THREE.Group();
+    group.add(mesh);
+    /* A pine that came down in an older storm, lying across the far side of the clearing. */
+    const log = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.42, 9, 10),
+      new THREE.MeshLambertMaterial({ color: '#41352a' }));
+    log.position.set(5.5, terrainH(5.5, -9) + 0.32, -9);
+    log.rotation.set(0, 0.7, Math.PI / 2);
+    group.add(log);
+    this.el.setObject3D('mesh', group);
+  },
+  tick: function (t) { if (this.mat.userData.shader) this.mat.userData.shader.uniforms.uTime.value = t / 1000; }
+});
+
+/* ---------- puddles, ringed by the rain landing in them ---------- */
+AFRAME.registerComponent('puddles', {
+  init: function () {
+    this.mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      uniforms: { uTime: { value: 0 }, uFlash: { value: 0 } },
+      vertexShader: `
+        varying vec2 vP, vUv;
+        void main() {
+          vUv = uv;
+          vec4 w = modelMatrix * vec4(position, 1.0);
+          vP = w.xz;
+          gl_Position = projectionMatrix * viewMatrix * w;
+        }`,
+      fragmentShader: `
+        uniform float uTime, uFlash;
+        varying vec2 vP, vUv;
+        /* Each 0.5 m cell gets a drop at a random spot and moment: a ring
+           that spreads and fades. */
+        float rings(vec2 p) {
+          vec2 cell = floor(p / 0.5);
+          float sum = 0.0;
+          for (int i = -1; i <= 1; i++) for (int j = -1; j <= 1; j++) {
+            vec2 c = cell + vec2(float(i), float(j));
+            float h = fract(sin(dot(c, vec2(12.9898, 78.233))) * 43758.5453);
+            vec2 centre = (c + vec2(h, fract(h * 7.13))) * 0.5;
+            float t = fract(uTime * 0.8 + h * 5.0);
+            float d = length(p - centre);
+            sum += smoothstep(0.025, 0.0, abs(d - t * 0.42)) * (1.0 - t);
+          }
+          return sum;
+        }
+        void main() {
+          float r = rings(vP);
+          vec3 col = vec3(0.07, 0.085, 0.10) + vec3(0.2, 0.23, 0.27) * r;
+          col += uFlash * vec3(0.55, 0.6, 0.72) * (0.7 + r);
+          float edge = smoothstep(0.5, 0.42, length(vUv - 0.5));
+          gl_FragColor = vec4(col, 0.94 * edge);
+        }`
+    });
+    const group = new THREE.Group();
+    PUDDLES.forEach(([x, z, s], i) => {
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2), this.mat);
+      m.position.set(x, terrainH(x, z) + 0.025, z);
+      m.scale.set(s * (1.1 + Math.sin(i * 3.7) * 0.25), 1, s * 0.85);
+      m.rotation.y = i * 1.3;
+      group.add(m);
+    });
+    this.el.setObject3D('mesh', group);
+  },
+  tick: function (t) {
+    this.mat.uniforms.uTime.value = t / 1000;
+    this.mat.uniforms.uFlash.value = storm.flash;
+  }
+});
+
+/* ---------- rain ----------------------------------------------------------
+   A box of falling streaks that always surrounds the camera: every drop
+   loops down through the box and wraps round it horizontally as you walk,
+   all worked out in the vertex shader, so the CPU never touches a drop.   */
+AFRAME.registerComponent('rain', {
+  schema: { count: { default: 9000 } },
+  init: function () {
+    const n = this.data.count, rnd = mulberry32(3);
+    const seed = new Float32Array(n * 2 * 3), end = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const s = [rnd(), rnd(), rnd()];
+      for (let k = 0; k < 2; k++) {
+        seed.set(s, (i * 2 + k) * 3);
+        end[i * 2 + k] = k;
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    /* position is unused but three needs it to know the vertex count. */
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 2 * 3), 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 3));
+    geo.setAttribute('aEnd', new THREE.BufferAttribute(end, 1));
+    this.mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      uniforms: { uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFlash: { value: 0 } },
+      vertexShader: `
+        attribute vec3 aSeed;
+        attribute float aEnd;
+        uniform float uTime, uFlash;
+        uniform vec3 uCam;
+        varying float vA;
+        const vec3 BOX = vec3(36.0, 22.0, 36.0);
+        const vec3 VEL = vec3(2.2, -15.0, 0.9);
+        void main() {
+          vec3 p = aSeed * BOX + VEL * uTime;
+          vec3 rel = mod(p - uCam + BOX * 0.5, BOX) - BOX * 0.5;
+          rel.y += 5.0;
+          vec3 w = uCam + rel - VEL * 0.032 * aEnd;
+          float d = length(rel.xz);
+          vA = (1.0 - smoothstep(10.0, 18.0, d)) * (aEnd > 0.5 ? 0.15 : 0.55);
+          gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);
+        }`,
+      fragmentShader: `
+        uniform float uFlash;
+        varying float vA;
+        void main() {
+          gl_FragColor = vec4(mix(vec3(0.58, 0.64, 0.72), vec3(0.95, 0.97, 1.0), uFlash), vA * (0.55 + uFlash * 0.6));
+        }`
+    });
+    const lines = new THREE.LineSegments(geo, this.mat);
+    lines.frustumCulled = false;
+    this.el.setObject3D('mesh', lines);
+  },
+  tick: function (t) {
+    const u = this.mat.uniforms, cam = this.el.sceneEl.camera;
+    u.uTime.value = t / 1000;
+    u.uFlash.value = storm.flash;
+    if (cam) cam.getWorldPosition(u.uCam.value);
+  }
+});
+
+/* ---------- lightning -----------------------------------------------------
+   Every few seconds the storm fires: usually a flicker deep inside the
+   clouds, sometimes a forked bolt down onto the hills. Each strike drives
+   storm.flash through a few quick pulses, which the sky, the rain, the
+   puddles, the lights and the fog all follow.                           */
+function boltPoints(a, b, rnd, rough, depth) {
+  let pts = [a, b];
+  for (let k = 0; k < depth; k++) {
+    const next = [pts[0]];
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const p = pts[i], q = pts[i + 1], len = p.distanceTo(q);
+      const mid = p.clone().lerp(q, 0.5 + (rnd() - 0.5) * 0.2);
+      mid.x += (rnd() - 0.5) * len * rough;
+      mid.z += (rnd() - 0.5) * len * rough;
+      mid.y += (rnd() - 0.5) * len * rough * 0.3;
+      next.push(mid, q);
+    }
+    pts = next;
+  }
+  return pts;
+}
+
+AFRAME.registerComponent('lightning', {
+  init: function () {
+    this.rnd = mulberry32(Date.now() & 0xffff);
+    this.next = 3;
+    this.pulses = null;
+    this.mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
+    this.bolt = new THREE.Mesh(new THREE.BufferGeometry(), this.mat);
+    this.bolt.frustumCulled = false;
+    this.bolt.visible = false;
+    this.el.setObject3D('mesh', this.bolt);
+    /* The bolt's own light, thrown across the forest from its direction. */
+    this.light = new THREE.DirectionalLight('#c9d6ff', 0);
+    this.el.object3D.add(this.light, this.light.target);
+    this.fogBase = null;
+  },
+
+  strike: function () {
+    const rnd = this.rnd, scene = this.el.sceneEl;
+    const az = rnd() * Math.PI * 2, dist = 60 + rnd() * 80;
+    storm.dir.set(Math.sin(az), 0.35, -Math.cos(az)).normalize();
+    const forked = rnd() < 0.45;
+    /* Two or three flickers, then a fading afterglow. */
+    const t0 = 0, pulses = [[t0, 0.07, 1]];
+    let t = 0.12;
+    for (let i = 0, n = 1 + Math.floor(rnd() * 3); i < n; i++) {
+      pulses.push([t, t + 0.05 + rnd() * 0.06, 0.55 + rnd() * 0.45]);
+      t += 0.1 + rnd() * 0.12;
+    }
+    this.strength = forked ? 1 : 0.35 + rnd() * 0.35;
+    this.pulses = pulses;
+    this.age = 0;
+    this.length = t + 0.45;
+    if (forked) this.buildBolt(az, dist);
+    this.bolt.visible = forked;
+    this.light.position.set(Math.sin(az) * 60, 60, -Math.cos(az) * 60);
+  },
+
+  buildBolt: function (az, dist) {
+    const rnd = this.rnd, cam = this.el.sceneEl.camera;
+    const cx = Math.sin(az) * dist, cz = -Math.cos(az) * dist;
+    /* High enough that most of it shows above the treetops. */
+    const top = new THREE.Vector3(cx + (rnd() - 0.5) * 30, 150, cz + (rnd() - 0.5) * 30);
+    const bottom = new THREE.Vector3(cx, terrainH(cx, cz), cz);
+    const strands = [{ pts: boltPoints(top, bottom, rnd, 0.42, 7), w: 1.5, c: 1 }];
+    const main = strands[0].pts;
+    for (let b = 0, n = 2 + Math.floor(rnd() * 4); b < n; b++) {
+      const from = main[Math.floor(rnd() * main.length * 0.6)];
+      const to = from.clone().add(new THREE.Vector3((rnd() - 0.5) * 50, -20 - rnd() * 35, (rnd() - 0.5) * 50));
+      strands.push({ pts: boltPoints(from, to, rnd, 0.5, 5), w: 0.6, c: 0.55 });
+    }
+    /* Flat ribbons, turned to face the viewer. */
+    const eye = new THREE.Vector3();
+    if (cam) cam.getWorldPosition(eye);
+    const pos = [], col = [], idx = [], side = new THREE.Vector3(), dir = new THREE.Vector3(), view = new THREE.Vector3();
+    for (const s of strands) {
+      for (let i = 0; i < s.pts.length; i++) {
+        const p = s.pts[i], q = s.pts[Math.min(i + 1, s.pts.length - 1)], o = s.pts[Math.max(i - 1, 0)];
+        dir.subVectors(q, o).normalize();
+        view.subVectors(p, eye).normalize();
+        side.crossVectors(dir, view).normalize().multiplyScalar(s.w * (1 - i / s.pts.length * 0.6));
+        const base = pos.length / 3;
+        pos.push(p.x - side.x, p.y - side.y, p.z - side.z, p.x + side.x, p.y + side.y, p.z + side.z);
+        col.push(0.85 * s.c, 0.9 * s.c, s.c, 0.85 * s.c, 0.9 * s.c, s.c);
+        if (i + 1 < s.pts.length) idx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geo.setIndex(idx);
+    this.bolt.geometry.dispose();
+    this.bolt.geometry = geo;
+  },
+
+  tick: function (t, dt) {
+    if (!dt) return;
+    dt = Math.min(dt, 100) / 1000;
+    const scene = this.el.sceneEl;
+    if (!this.fogBase && scene.object3D.fog) this.fogBase = scene.object3D.fog.color.clone();
+    this.next -= dt;
+    if (this.next <= 0) { this.strike(); this.next = 5 + this.rnd() * 9; }
+    let f = 0;
+    if (this.pulses) {
+      this.age += dt;
+      for (const [a, b, s] of this.pulses) if (this.age >= a && this.age <= b) f = Math.max(f, s);
+      const last = this.pulses[this.pulses.length - 1][1];
+      if (this.age > last) f = Math.max(f, 0.3 * Math.exp(-(this.age - last) * 7));
+      f *= this.strength;
+      if (this.age > this.length) { this.pulses = null; this.bolt.visible = false; }
+    }
+    storm.flash = f;
+    this.mat.opacity = Math.min(1, f * 1.6);
+    this.light.intensity = f * 2.6;
+    if (this.fogBase) scene.object3D.fog.color.copy(this.fogBase).lerp(FLASH_FOG, f * 0.55);
+    if (!this.hemi) {
+      const h = scene.querySelector('[light*="hemisphere"]');
+      this.hemi = h && h.getObject3D('light');
+      if (this.hemi) this.hemiBase = this.hemi.intensity;
+    }
+    if (this.hemi) this.hemi.intensity = this.hemiBase + f * 1.5;
+  }
+});
+const FLASH_FOG = new THREE.Color('#8d97a6');
+
+/* ---------- keep the walker in the clearing ---------- */
+AFRAME.registerComponent('forest-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    const d = Math.hypot(p.x, p.z);
+    if (d > WALK_R) { p.x *= WALK_R / d; p.z *= WALK_R / d; }
+    p.y = terrainH(p.x, p.z) + this.data.height;
+  }
+});
+
+/* ---------- put a markup landmark on the ground ---------- */
+AFRAME.registerComponent('on-ground', {
+  init: function () {
+    const p = AFRAME.utils.coordinates.parse(this.el.getDOMAttribute('position') || '0 0 0');
+    this.el.setAttribute('position', { x: p.x, y: terrainH(p.x, p.z), z: p.z });
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Storm Forest</b><br>WASD / arrows to walk &middot; drag to look &middot; wait for the lightning</div>
+
+<a-scene fog="type: exponential; color: #262c32; density: 0.034"
+         renderer="colorManagement: true; antialias: true">
+
+  <a-entity storm-sky></a-entity>
+  <a-entity forest-floor></a-entity>
+  <a-entity undergrowth></a-entity>
+  <a-entity puddles></a-entity>
+  <a-entity pines></a-entity>
+  <a-entity rain></a-entity>
+  <a-entity lightning></a-entity>
+
+  <a-entity light="type: hemisphere; color: #8994a4; groundColor: #1a2018; intensity: 0.42"></a-entity>
+  <a-entity position="-20 40 -10" light="type: directional; color: #9aa6b8; intensity: 0.22"></a-entity>
+
+  <a-entity id="rig" position="0 1.6 6" forest-walk
+            wasd-controls="acceleration: 40" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="800" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- Onward: an old stone arch among the pines behind you, and through it
+       a glimpse of a clear night. -->
+  <a-entity position="0 0 11" rotation="0 180 0" on-ground>
+    <a-entity geometry="primitive: arch-frame; halfWidth: 1.3; straightHeight: 2.3;
+                        thickness: 0.4; depth: 0.55"
+              material="color: #5b6062; roughness: 1"></a-entity>
+    <a-entity class="portal"
+              geometry="primitive: arch; halfWidth: 1.3; straightHeight: 2.3"
+              position="0 0 0.05" material="shader: flat"
+              portal="href: next; color: #1d2152; hover: #3d44a0"></a-entity>
+    <a-entity position="0 1.7 0.12"
+              starfield="count: 70; shape: volume; extent: 2.2 2.8 0.02; size: 0.035;
+                         spin: 0; palette: #ffffff,#dbe7ff,#ffe9c4"></a-entity>
+    <!-- Moss on the stones. -->
+    <a-sphere position="-1.45 2.9 0.2" radius="0.42" scale="1 0.5 0.7"
+              material="color: #3d5230; roughness: 1"></a-sphere>
+    <a-sphere position="0.9 3.55 0.2" radius="0.36" scale="1.2 0.45 0.7"
+              material="color: #455c35; roughness: 1"></a-sphere>
+    <a-entity position="0 1.8 1.4"
+              light="type: point; color: #8a93ff; intensity: 0.8; distance: 7"></a-entity>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Starry Night</title>
+<script src="https://aframe.io/releases/1.5.0/aframe.min.js"></script>
+<script src="js/cosmos.js"></script>
+<script src="js/routes.js"></script>
+<script src="js/portal.js"></script>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #04060c; }
+  #hint { position: fixed; left: 16px; bottom: 16px; z-index: 999;
+    background: rgba(8,10,24,.66); color: #d9def5; padding: 10px 14px;
+    border: 1px solid rgba(150,160,230,.22); border-radius: 10px;
+    font-size: 13px; line-height: 1.5; pointer-events: none; }
+  #hint b { color: #f2f4ff; }
+</style>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+const THREE = AFRAME.THREE;
+const S = THREE.MathUtils.smoothstep;
+
+/* ---------- deterministic randomness ---------- */
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+/* ---------- value noise / fbm ---------- */
+function hash2(x, y) {
+  const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return n - Math.floor(n);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi), b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function fbm(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 4; i++) { s += amp * vnoise(x * f, y * f); f *= 2; amp *= 0.5; }
+  return s;
+}
+function ridged(x, y) {
+  let s = 0, amp = 0.5, f = 1;
+  for (let i = 0; i < 5; i++) {
+    const n = 1 - Math.abs(2 * vnoise(x * f, y * f) - 1);
+    s += amp * n * n; f *= 2.03; amp *= 0.5;
+  }
+  return s;
+}
+
+/* A meadow in a wide valley, flat where you stand, with mountains all round. */
+function terrainH(x, z) {
+  const d = Math.hypot(x, z);
+  return (fbm(x * 0.02, z * 0.02) - 0.5) * 9 * S(d, 10, 70) + S(d, 110, 170) * 8;
+}
+function mountainH(x, z) {
+  const d = Math.hypot(x, z), a = Math.atan2(z, x);
+  const big = 0.55 + 0.45 * fbm(Math.cos(a) * 2 + 5, Math.sin(a) * 2);   /* higher on some sides */
+  return S(d, 150, 235) * (ridged(x * 0.008, z * 0.008) * 120 * big + 6) - 4;
+}
+const WALK_R = 36;
+/* The Milky Way lies along the great circle with this pole. */
+const BAND = new THREE.Vector3(0.32, 0.5, 0.8).normalize();
+
+/* ---------- the night sky behind the stars: deep blue, a faint glow along
+   the horizon, and the haze and dust lanes of the Milky Way ---------- */
+AFRAME.registerComponent('night-sky', {
+  init: function () {
+    const mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: { uBand: { value: BAND } },
+      vertexShader: `
+        varying vec3 vDir;
+        void main() {
+          vDir = (modelMatrix * vec4(position, 1.0)).xyz - cameraPosition;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        uniform vec3 uBand;
+        varying vec3 vDir;
+        float h3(vec3 p) {
+          p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+          p *= 17.0;
+          return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+        }
+        float n3(vec3 x) {
+          vec3 i = floor(x), f = fract(x);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+                     mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z);
+        }
+        float fbm3(vec3 p) {
+          float v = 0.0, a = 0.5;
+          for (int i = 0; i < 5; i++) { v += a * n3(p); p *= 2.03; a *= 0.5; }
+          return v;
+        }
+        void main() {
+          vec3 d = normalize(vDir);
+          float y = max(d.y, 0.0);
+          vec3 col = mix(vec3(0.055, 0.075, 0.14), vec3(0.008, 0.012, 0.035), pow(y, 0.45));
+          col += vec3(0.03, 0.05, 0.07) * exp(-y * 9.0);            /* airglow over the peaks */
+          float off = dot(d, uBand);
+          float band = exp(-off * off * 40.0);
+          float haze = fbm3(d * 5.0) * 0.8 + fbm3(d * 14.0) * 0.4;
+          float dust = smoothstep(0.5, 0.75, fbm3(d * 8.0 + 3.0)) * exp(-off * off * 140.0);
+          vec3 milk = mix(vec3(0.17, 0.19, 0.30), vec3(0.30, 0.26, 0.24), smoothstep(0.4, 0.9, haze));
+          col += milk * band * haze * 0.5 * (1.0 - dust * 0.8);
+          gl_FragColor = vec4(col, 1.0);
+        }`
+    });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(900, 48, 24), mat);
+    mesh.frustumCulled = false;
+    mesh.renderOrder = -2;
+    this.el.setObject3D('mesh', mesh);
+  },
+  tick: function () {
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+  }
+});
+
+/* ---------- the stars ------------------------------------------------------
+   A few thousand scattered over the sky and as many again crowded into the
+   Milky Way. Each flickers on two beats of its own; low ones, seen through
+   more air, flicker hardest, the way real stars do near the horizon.      */
+AFRAME.registerComponent('stars', {
+  schema: { count: { default: 5500 }, band: { default: 4500 } },
+  init: function () {
+    const rnd = mulberry32(2718), d = this.data, n = d.count + d.band;
+    const pos = new Float32Array(n * 3), colr = new Float32Array(n * 3);
+    const size = new Float32Array(n), phase = new Float32Array(n), rate = new Float32Array(n);
+    const palette = ['#ffffff', '#dfe8ff', '#b8ccff', '#fff1d6', '#ffd9a8', '#cfd8ff'].map(h => new THREE.Color(h));
+    /* Two directions spanning the Milky Way's plane. */
+    const u = new THREE.Vector3(0, 1, 0).cross(BAND).normalize(), w = BAND.clone().cross(u);
+    const v = new THREE.Vector3();
+    for (let i = 0; i < n; i++) {
+      do {
+        if (i < d.count) {
+          v.set(rnd() * 2 - 1, rnd() * 2 - 1, rnd() * 2 - 1);
+          if (v.lengthSq() > 1 || v.lengthSq() < 1e-4) { v.y = -1; continue; }
+          v.normalize();
+        } else {
+          const a = rnd() * Math.PI * 2, g = (rnd() + rnd() + rnd() - 1.5) * 0.12;
+          v.copy(u).multiplyScalar(Math.cos(a)).addScaledVector(w, Math.sin(a)).addScaledVector(BAND, g).normalize();
+        }
+      } while (v.y < -0.05);
+      pos.set([v.x * 800, v.y * 800, v.z * 800], i * 3);
+      const c = palette[Math.floor(rnd() * palette.length)];
+      colr.set([c.r, c.g, c.b], i * 3);
+      /* Most stars faint, a few bright ones; the Milky Way's mostly faint. */
+      const bright = Math.pow(rnd(), i < d.count ? 5 : 9);
+      size[i] = 1.6 + bright * 5.5;
+      phase[i] = rnd() * 100;
+      rate[i] = 1.2 + rnd() * 3.5;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aColor', new THREE.BufferAttribute(colr, 3));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+    geo.setAttribute('aRate', new THREE.BufferAttribute(rate, 1));
+    const renderer = this.el.sceneEl.renderer;
+    this.mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      uniforms: { uTime: { value: 0 }, uPR: { value: renderer ? renderer.getPixelRatio() : (window.devicePixelRatio || 1) } },
+      vertexShader: `
+        attribute vec3 aColor;
+        attribute float aSize, aPhase, aRate;
+        uniform float uTime, uPR;
+        varying vec3 vC;
+        varying float vB;
+        void main() {
+          float alt = normalize(position).y;
+          float a = sin(uTime * aRate + aPhase) * 0.5 + 0.5;
+          float b = sin(uTime * aRate * 2.7 + aPhase * 3.1) * 0.5 + 0.5;
+          float depth = mix(0.85, 0.3, smoothstep(0.0, 0.45, alt));
+          vB = 1.0 - depth * (1.0 - a * b);
+          vC = aColor;
+          gl_PointSize = aSize * uPR * (0.7 + 0.4 * vB);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }`,
+      fragmentShader: `
+        varying vec3 vC;
+        varying float vB;
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          float core = smoothstep(0.5, 0.0, d);
+          float a = core * core * vB;
+          if (a < 0.01) discard;
+          gl_FragColor = vec4(vC * (0.6 + core * 0.6), a);
+        }`
+    });
+    this.points = new THREE.Points(geo, this.mat);
+    this.points.frustumCulled = false;
+    this.points.renderOrder = -1;
+    this.el.setObject3D('mesh', this.points);
+  },
+  tick: function (t) {
+    this.mat.uniforms.uTime.value = t / 1000;
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+  }
+});
+
+/* ---------- now and then, a shooting star ---------- */
+AFRAME.registerComponent('shooting-stars', {
+  init: function () {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array([1, 1, 1, 1, 0.8, 0.85, 1, 0]), 4));
+    this.line = new THREE.Line(geo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false, fog: false }));
+    this.line.frustumCulled = false;
+    this.line.visible = false;
+    this.el.setObject3D('mesh', this.line);
+    this.rnd = mulberry32(Date.now() & 0xffff);
+    this.wait = 4;
+    this.a = new THREE.Vector3(); this.b = new THREE.Vector3(); this.p = new THREE.Vector3();
+  },
+  tick: function (t, dt) {
+    if (!dt) return;
+    dt = Math.min(dt, 100) / 1000;
+    const cam = this.el.sceneEl.camera;
+    if (cam) cam.getWorldPosition(this.el.object3D.position);
+    if (!this.age && this.age !== 0) {
+      this.wait -= dt;
+      if (this.wait > 0) return;
+      /* Somewhere fairly high up, heading off at a slant. */
+      const rnd = this.rnd, az = rnd() * Math.PI * 2, el = 0.35 + rnd() * 0.7;
+      this.a.set(Math.cos(az) * Math.cos(el), Math.sin(el), Math.sin(az) * Math.cos(el));
+      const turn = az + (rnd() < 0.5 ? 1 : -1) * (0.25 + rnd() * 0.25);
+      const el2 = el - 0.15 - rnd() * 0.2;
+      this.b.set(Math.cos(turn) * Math.cos(el2), Math.sin(el2), Math.sin(turn) * Math.cos(el2));
+      this.age = 0;
+      this.dur = 0.6 + rnd() * 0.5;
+      this.line.visible = true;
+    }
+    this.age += dt;
+    const k = this.age / this.dur;
+    if (k >= 1.25) { this.age = null; this.line.visible = false; this.wait = 6 + this.rnd() * 12; return; }
+    const head = Math.min(k, 1), tail = Math.max(0, k - 0.3);
+    const arr = this.line.geometry.attributes.position.array;
+    this.p.copy(this.a).lerp(this.b, head).normalize().multiplyScalar(700);
+    arr[0] = this.p.x; arr[1] = this.p.y; arr[2] = this.p.z;
+    this.p.copy(this.a).lerp(this.b, tail).normalize().multiplyScalar(700);
+    arr[3] = this.p.x; arr[4] = this.p.y; arr[5] = this.p.z;
+    this.line.geometry.attributes.position.needsUpdate = true;
+    this.line.material.opacity = k < 1 ? 1 : 1 - (k - 1) * 4;
+  }
+});
+
+/* ---------- the mountains, all the way round ---------- */
+AFRAME.registerComponent('mountain-ring', {
+  init: function () {
+    const NA = 300, NR = 34, R0 = 140, R1 = 430;
+    const pos = [], colors = [], idx = [];
+    const rock = new THREE.Color('#141a2c'), snow = new THREE.Color('#8b98bd'), c = new THREE.Color();
+    for (let j = 0; j <= NR; j++) {
+      const r = R0 + (R1 - R0) * Math.pow(j / NR, 1.2);
+      for (let i = 0; i <= NA; i++) {
+        const a = i / NA * Math.PI * 2, x = Math.cos(a) * r, z = Math.sin(a) * r;
+        const h = mountainH(x, z);
+        pos.push(x, h, z);
+        const snowLine = 52 + (fbm(x * 0.03, z * 0.03) - 0.5) * 20;
+        c.copy(rock).lerp(snow, S(h, snowLine, snowLine + 12) * 0.85);
+        colors.push(c.r, c.g, c.b);
+      }
+    }
+    for (let j = 0; j < NR; j++) for (let i = 0; i < NA; i++) {
+      const a = j * (NA + 1) + i, b = a + NA + 1;
+      idx.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    this.el.setObject3D('mesh', new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide })));
+  }
+});
+
+/* ---------- the meadow ---------- */
+AFRAME.registerComponent('meadow', {
+  init: function () {
+    const geo = new THREE.PlaneGeometry(400, 400, 160, 160);
+    geo.rotateX(-Math.PI / 2);
+    const p = geo.attributes.position, colors = new Float32Array(p.count * 3);
+    const a = new THREE.Color('#15241b'), b = new THREE.Color('#1f3326'), c = new THREE.Color();
+    for (let i = 0; i < p.count; i++) {
+      const x = p.getX(i), z = p.getZ(i);
+      p.setY(i, terrainH(x, z));
+      c.copy(a).lerp(b, fbm(x * 0.06, z * 0.06));
+      colors[i * 3] = c.r; colors[i * 3 + 1] = c.g; colors[i * 3 + 2] = c.b;
+    }
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    this.el.setObject3D('mesh', new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true })));
+  }
+});
+
+/* ---------- grass and flowers, stirring in a light breeze ---------- */
+function bladeGeometry(width, height) {
+  const segs = 3, pos = [], uv = [], idx = [], norm = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs, w = width * (1 - t * 0.85);
+    pos.push(-w, t * height, 0); uv.push(0, t); norm.push(0, 1, 0);
+    pos.push(w, t * height, 0); uv.push(1, t); norm.push(0, 1, 0);
+  }
+  for (let i = 0; i < segs; i++) { const a = i * 2; idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(norm, 3));
+  g.setIndex(idx);
+  return g;
+}
+/* Five round petals round a centre, lying flat. */
+function flowerGeometry() {
+  const s = new THREE.Shape(), N = 5, R = 0.07;
+  for (let k = 0; k <= N * 8; k++) {
+    const a = k / (N * 8) * Math.PI * 2, r = R * (0.45 + 0.55 * Math.abs(Math.cos(a * N / 2)));
+    if (k === 0) s.moveTo(Math.cos(a) * r, Math.sin(a) * r); else s.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  return new THREE.ShapeGeometry(s).rotateX(-Math.PI / 2);
+}
+function breeze(mat, key, glow) {
+  mat.onBeforeCompile = function (shader) {
+    shader.uniforms.uTime = { value: 0 };
+    shader.vertexShader = 'uniform float uTime;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+      `#include <begin_vertex>
+       float wx = instanceMatrix[3][0], wz = instanceMatrix[3][2];
+       float sway = sin(uTime * 1.1 + wx * 0.25 + wz * 0.3) * 0.5 + sin(uTime * 2.3 + wx * 0.7) * 0.2;
+       float lift = ${glow ? '1.0' : 'uv.y * uv.y'};
+       transformed.x += sway * lift * 0.06;
+       transformed.z += sway * lift * 0.03;`);
+    /* Night flowers glow very faintly in their own colour, so the meadow
+       reads as full of them even with no moon. */
+    if (glow) shader.fragmentShader = shader.fragmentShader.replace('#include <emissivemap_fragment>',
+      '#include <emissivemap_fragment>\n totalEmissiveRadiance += diffuseColor.rgb * ' + glow.toFixed(2) + ';');
+    mat.userData.shader = shader;
+  };
+  mat.customProgramCacheKey = function () { return key; };
+  return mat;
+}
+const FLOWER_COLORS = ['#f4f2ff', '#cbb8ff', '#a9c4ff', '#ffc6e0', '#fff1b0', '#e0d0ff'];
+AFRAME.registerComponent('wildflowers', {
+  schema: { grass: { default: 9000 }, flowers: { default: 11000 }, radius: { default: 44 } },
+  init: function () {
+    const rnd = mulberry32(1001), d = this.data, dummy = new THREE.Object3D(), col = new THREE.Color();
+    this.mats = [
+      breeze(new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), 'night-grass', 0),
+      breeze(new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), 'night-stems', 0),
+      breeze(new THREE.MeshLambertMaterial({ side: THREE.DoubleSide }), 'night-flowers', 0.38)
+    ];
+    const grass = new THREE.InstancedMesh(bladeGeometry(0.045, 0.5), this.mats[0], d.grass);
+    for (let i = 0; i < d.grass; i++) {
+      const a = rnd() * Math.PI * 2, r = Math.sqrt(rnd()) * d.radius, x = Math.cos(a) * r, z = Math.sin(a) * r;
+      dummy.position.set(x, terrainH(x, z) - 0.03, z);
+      dummy.rotation.set(0, rnd() * Math.PI, 0);
+      dummy.scale.set(1, 0.6 + rnd() * 0.9, 1);
+      dummy.updateMatrix();
+      grass.setMatrixAt(i, dummy.matrix);
+      grass.setColorAt(i, col.setHSL(0.36 + rnd() * 0.08, 0.3, 0.1 + rnd() * 0.08));
+    }
+    /* Flowers grow in drifts of one colour, thickest round where you stand. */
+    const stems = new THREE.InstancedMesh(bladeGeometry(0.008, 1), this.mats[1], d.flowers);
+    const heads = new THREE.InstancedMesh(flowerGeometry(), this.mats[2], d.flowers);
+    let placed = 0;
+    while (placed < d.flowers) {
+      const a = rnd() * Math.PI * 2, r = 1.5 + Math.pow(rnd(), 0.7) * (d.radius - 6);
+      const cx = Math.cos(a) * r, cz = Math.sin(a) * r, hue = FLOWER_COLORS[Math.floor(rnd() * FLOWER_COLORS.length)];
+      for (let i = 0; i < 30 && placed < d.flowers; i++, placed++) {
+        const x = cx + (rnd() - 0.5) * 4, z = cz + (rnd() - 0.5) * 4, h = 0.28 + rnd() * 0.3, y = terrainH(x, z);
+        dummy.position.set(x, y - 0.02, z);
+        dummy.rotation.set(0, rnd() * 3, 0);
+        dummy.scale.set(1, h, 1);
+        dummy.updateMatrix();
+        stems.setMatrixAt(placed, dummy.matrix);
+        stems.setColorAt(placed, col.set('#1f3a24'));
+        dummy.position.set(x, y + h, z);
+        dummy.rotation.set((rnd() - 0.5) * 0.7, rnd() * 6, (rnd() - 0.5) * 0.7);
+        dummy.scale.setScalar(0.9 + rnd() * 0.7);
+        dummy.updateMatrix();
+        heads.setMatrixAt(placed, dummy.matrix);
+        heads.setColorAt(placed, col.set(rnd() < 0.85 ? hue : FLOWER_COLORS[Math.floor(rnd() * FLOWER_COLORS.length)]));
+      }
+    }
+    grass.frustumCulled = stems.frustumCulled = heads.frustumCulled = false;
+    const group = new THREE.Group();
+    group.add(grass, stems, heads);
+    this.el.setObject3D('mesh', group);
+  },
+  tick: function (t) {
+    for (const m of this.mats) if (m.userData.shader) m.userData.shader.uniforms.uTime.value = t / 1000;
+  }
+});
+
+/* ---------- keep the walker in the meadow ---------- */
+AFRAME.registerComponent('meadow-walk', {
+  schema: { height: { default: 1.6 } },
+  tick: function () {
+    const p = this.el.object3D.position;
+    const d = Math.hypot(p.x, p.z);
+    if (d > WALK_R) { p.x *= WALK_R / d; p.z *= WALK_R / d; }
+    p.y = terrainH(p.x, p.z) + this.data.height;
+  }
+});
+
+/* ---------- put a markup landmark on the ground ---------- */
+AFRAME.registerComponent('on-ground', {
+  init: function () {
+    const p = AFRAME.utils.coordinates.parse(this.el.getDOMAttribute('position') || '0 0 0');
+    this.el.setAttribute('position', { x: p.x, y: terrainH(p.x, p.z), z: p.z });
+  }
+});
+});
+</script>
+</head>
+<body>
+<div id="hint"><b>Starry Night</b><br>WASD / arrows to walk &middot; drag to look &middot; look up</div>
+
+<a-scene fog="type: exponential; color: #0b1020; density: 0.0036"
+         renderer="colorManagement: true; antialias: true">
+
+  <a-entity night-sky></a-entity>
+  <a-entity stars></a-entity>
+  <a-entity shooting-stars></a-entity>
+  <a-entity mountain-ring></a-entity>
+  <a-entity meadow></a-entity>
+  <a-entity wildflowers></a-entity>
+
+  <!-- No moon: starlight only, cool and faint. -->
+  <a-entity light="type: hemisphere; color: #51619a; groundColor: #0c120e; intensity: 0.6"></a-entity>
+  <a-entity position="-30 60 -40" light="type: directional; color: #9aaaff; intensity: 0.3"></a-entity>
+
+  <a-entity id="rig" position="0 1.6 6" meadow-walk
+            wasd-controls="acceleration: 40" look-controls>
+    <!-- a-camera brings its own wasd-controls and look-controls. Left enabled
+         they move the camera inside the rig, which doubles the movement rate
+         and slips straight past the boundary clamp on the rig. -->
+    <a-camera far="1400" wasd-controls="enabled: false" look-controls="enabled: false">
+      <a-cursor raycaster="objects: .portal" fuse-timeout="1200"></a-cursor>
+    </a-camera>
+  </a-entity>
+
+  <!-- The end of this branch: a way home to the hub, behind where you arrive. -->
+  <a-entity position="0 0 11" rotation="0 180 0" on-ground>
+    <a-entity geometry="primitive: arch-frame; halfWidth: 1.3; straightHeight: 2.3;
+                        thickness: 0.36; depth: 0.5"
+              material="color: #2a2d3c; roughness: 1"></a-entity>
+    <a-entity class="portal"
+              geometry="primitive: arch; halfWidth: 1.3; straightHeight: 2.3"
+              position="0 0 0.05" material="shader: flat"
+              portal="href: next; color: #2b1f55; hover: #5a3fb0"></a-entity>
+    <a-entity position="0 1.7 0.12"
+              starfield="count: 60; shape: volume; extent: 2.2 2.8 0.02; size: 0.035;
+                         spin: 0; palette: #ffffff,#e2c4ff,#a9c6ff"></a-entity>
+    <a-text value="Back to the hub" align="center" width="4" color="#cfd3f5"
+            position="0 4.1 0.1"></a-text>
+  </a-entity>
+  <a-entity laser-controls="hand: right" raycaster="objects: .portal"></a-entity>
+</a-scene>
+</body>
+</html>

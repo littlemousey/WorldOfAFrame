@@ -1,5 +1,6 @@
 /* Turns an entity into a door: click it (or gaze at it in VR) to travel to
-   another page. Used by the hub room and by the "back" doors in each world. */
+   another page. Used by the hub room and by the doors in each world.
+   `href: next` asks js/routes.js where this world's onward door leads. */
 AFRAME.registerComponent('portal', {
   schema: {
     href:  {type: 'string'},
@@ -34,7 +35,8 @@ AFRAME.registerComponent('portal', {
     });
 
     el.addEventListener('click', function () {
-      window.location.href = data.href;
+      window.location.href = data.href !== 'next' ? data.href :
+        typeof nextWorld === 'function' ? nextWorld() : 'index.html';
     });
   }
 });
